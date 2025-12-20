@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Dict, Any, List
 from openai import AsyncOpenAI
 from motor.motor_asyncio import AsyncIOMotorClient
+import certifi
 from data import get_full_analysis
 from prompt import SYSTEM_PROMPT, USER_PROMPT
 
@@ -38,8 +39,6 @@ class PaperTradingAccount:
         if not mongo_uri:
             logger.error("MONGO_URI not found in env")
             return
-
-import certifi
 
         try:
             self.db_client = AsyncIOMotorClient(mongo_uri, tlsCAFile=certifi.where())
