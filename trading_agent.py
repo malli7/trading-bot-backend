@@ -39,8 +39,10 @@ class PaperTradingAccount:
             logger.error("MONGO_URI not found in env")
             return
 
+import certifi
+
         try:
-            self.db_client = AsyncIOMotorClient(mongo_uri)
+            self.db_client = AsyncIOMotorClient(mongo_uri, tlsCAFile=certifi.where())
             self.db = self.db_client.get_database("trading_bot")
             self.collection = self.db.get_collection("account_state")
             logger.info("Connected to MongoDB")

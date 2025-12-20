@@ -1,0 +1,21 @@
+name: Scheduled Trade Decision
+
+on:
+  schedule:
+    # Run every 15 minutes
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    # Allow manual triggering
+
+jobs:
+  trigger-trade:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call Trade Decision Endpoint
+        run: |
+          if [ -z "${{ secrets.DEPLOY_URL }}" ]; then
+            echo "DEPLOY_URL secret is not set!"
+            exit 1
+          fi
+          echo "Triggering trade decision at $(date)..."
+          curl -X POST "${{ secrets.DEPLOY_URL }}/trade_decision"

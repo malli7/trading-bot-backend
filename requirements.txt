@@ -5,3 +5,4 @@ lighter-v2-python
 openai
 motor
 gunicorn
+certifi
