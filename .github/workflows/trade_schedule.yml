@@ -18,4 +18,4 @@ jobs:
             exit 1
           fi
           echo "Triggering trade decision at $(date)..."
-          curl -X POST "${{ secrets.DEPLOY_URL }}/trade_decision"
+          curl -X POST "https://trading-bot-backend-2dfq.onrender.com/trade_decision"
