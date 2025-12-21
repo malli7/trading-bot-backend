@@ -187,22 +187,62 @@ class PaperTradingAccount:
                 logger.warning(f"Position already exists for {coin}, skipping {signal}")
                 return
             
-            # Position Sizing Logic check
-            quantity = float(decision.get("quantity", 0))
+            # Position Sizing Logic (Auto-Calculated)
             leverage = int(decision.get("leverage", 1))
+            stop_loss = decision.get("stop_loss")
             
-            # Basic validation
-            if quantity <= 0:
-                logger.warning("Invalid quantity, skipping")
+            # 1. Validation
+            if not stop_loss:
+                logger.warning(f"Stop Loss missing for {coin}, cannot calculate risk. Skipping.")
                 return
 
+            entry_price = current_price
+            
+            # 2. Risk-Based Sizing
+            # Risk per share = |Entry - StopLoss|
+            risk_per_share = abs(entry_price - float(stop_loss))
+            if risk_per_share == 0:
+                logger.warning("Stop loss equals entry price, invalid.")
+                return
+
+            # Max Risk Allowed = 2% of Total Account Value
+            # Using total_value is better than cash for portfolio sizing
+            account_value = self.total_value
+            max_risk_allowed = account_value * 0.02
+            
+            qty_risk = max_risk_allowed / risk_per_share
+            
+            # 3. Margin-Based Sizing
+            # Max Margin Allowed = 20% of Total Account Value
+            max_margin_allowed = account_value * 0.20
+            
+            # Position Value = Margin * Leverage
+            max_position_value = max_margin_allowed * leverage
+            
+            qty_margin = max_position_value / entry_price
+            
+            # 4. Cash Constraint (Hard Limit)
+            # Can't spend more cash than we have
+            qty_cash = (self.cash * leverage) / entry_price
+
+            # 5. Final Quantity
+            # We take the minimum of all constraints
+            quantity = min(qty_risk, qty_margin, qty_cash)
+            
+            if quantity <= 0:
+                logger.warning(f"Calculated quantity is {quantity}, skipping.")
+                return
+
+            # Recalculate margin required for the final quantity
             position_value_usd = quantity * current_price
             margin_required = position_value_usd / leverage
             
+            # Double check cash just in case rounding issues
             if margin_required > self.cash:
-                logger.warning(f"Insufficient cash for trade. Needed: {margin_required}, Have: {self.cash}")
-                return
-            
+                 # Adjust slightly if floating point error
+                 quantity = (self.cash * leverage) / current_price
+                 margin_required = self.cash
+
             self.cash -= margin_required
             
             self.positions[coin] = {
@@ -211,12 +251,17 @@ class PaperTradingAccount:
                 "quantity": quantity,
                 "leverage": leverage,
                 "margin": margin_required,
-                "stop_loss": decision.get("stop_loss"),
+                "stop_loss": stop_loss,
                 "take_profit": decision.get("profit_target"),
                 "unrealized_pnl": 0.0,
                 "timestamp": datetime.utcnow().isoformat()
             }
-            logger.info(f"Executed {signal} on {coin} @ {current_price} with {margin_required:.2f} margin")
+            
+            logger.info(f"Executed {signal} on {coin}. "
+                        f"Price: {current_price}, Qty: {quantity:.4f}, Lev: {leverage}x. "
+                        f"Margin: {margin_required:.2f} (Limit: {max_margin_allowed:.2f}). "
+                        f"Risk: {risk_per_share*quantity:.2f} (Limit: {max_risk_allowed:.2f})")
+                        
             self.history.append({"action": signal, "coin": coin, "price": current_price, "time": datetime.utcnow().isoformat(), "result": "OPEN"})
             await self.save_state()
 
