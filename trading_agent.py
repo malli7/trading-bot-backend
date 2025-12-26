@@ -8,7 +8,68 @@ from openai import AsyncOpenAI
 from motor.motor_asyncio import AsyncIOMotorClient
 import certifi
 from data import get_full_analysis
-from prompt import SYSTEM_PROMPT, USER_PROMPT
+
+from prompt2 import SYSTEM_PROMPT, USER_PROMPT
+from prompt3 import SENTIMENT_SYSTEM_PROMPT, SENTIMENT_USER_PROMPT
+
+async def run_sentiment_analysis():
+    """Run market regime analysis without trading"""
+    
+    # 1. Gather Data
+    market_data, _ = await get_all_market_data()
+    
+    # 2. Format Prompt
+    market_state_str = json.dumps(market_data, default=str)
+    
+    formatted_user_prompt = SENTIMENT_USER_PROMPT.format(
+        ALL_INDICATOR_DATA=market_state_str
+    )
+    
+    full_prompt = [
+        {"role": "system", "content": SENTIMENT_SYSTEM_PROMPT},
+        {"role": "user", "content": formatted_user_prompt}
+    ]
+    
+    # 3. Call AI
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        logger.error("OPENROUTER_API_KEY not found in env")
+        return {"status": "error", "message": "Missing API Key"}
+        
+    client = AsyncOpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=api_key,
+    )
+    
+    model = "google/gemini-2.5-flash-lite"
+    
+    try:
+        completion = await client.chat.completions.create(
+            model=model,
+            messages=full_prompt,
+            temperature=0.1
+        )
+        
+        response_content = completion.choices[0].message.content
+        logger.info(f"Sentiment Analysis Provided")
+        
+        # 4. Parse Decision
+        clean_content = response_content.strip()
+        if clean_content.startswith("```json"):
+            clean_content = clean_content[7:]
+        if clean_content.endswith("```"):
+            clean_content = clean_content[:-3]
+        
+        analysis_data = json.loads(clean_content)
+        
+        return {
+            "status": "success",
+            "analysis": analysis_data
+        }
+        
+    except Exception as e:
+        logger.exception("Error in sentiment analysis cycle")
+        return {"status": "error", "message": str(e)}
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -345,12 +406,8 @@ async def run_agent_cycle():
     )
     
     #model = "nex-agi/deepseek-v3.1-nex-n1:free"
-    #model = "nvidia/nemotron-3-nano-30b-a3b:free" 
-    model = "google/gemini-3-flash-preview" 
-    # # Defaulting to a high capability model, or we can use deepseek/deepseek-chat
-    # User had "deepseek" in snippets, maybe deepseek-chat is better/cheaper?
-    # Let's try to stick to something standard unless configured.
-    # I'll use "openai/gpt-4o" as it's reliable for complex JSON following.
+    #model = "xiaomi/mimo-v2-flash:free" 
+    model = "google/gemini-2.5-flash-lite" 
     
     try:
         completion = await client.chat.completions.create(

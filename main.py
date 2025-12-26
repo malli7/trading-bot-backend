@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import os
 from data import get_indicators, get_full_analysis
-from trading_agent import run_agent_cycle, demo_account
+from trading_agent import run_agent_cycle, demo_account, run_sentiment_analysis
 
 load_dotenv()
 
@@ -35,6 +35,14 @@ async def trade_decision():
     Trigger the AI Agent to analyze markets and make a decision.
     """
     result = await run_agent_cycle()
+    return result
+
+@app.post("/sentiment")
+async def sentiment_analysis():
+    """
+    Trigger the AI Agent to analyze market regime.
+    """
+    result = await run_sentiment_analysis()
     return result
 
 @app.get("/account")
