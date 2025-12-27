@@ -9,8 +9,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import certifi
 from data import get_full_analysis
 
-from prompt2 import SYSTEM_PROMPT, USER_PROMPT
-from prompt3 import SENTIMENT_SYSTEM_PROMPT, SENTIMENT_USER_PROMPT
+from prompt import SYSTEM_PROMPT, USER_PROMPT, SENTIMENT_SYSTEM_PROMPT, SENTIMENT_USER_PROMPT
 
 async def run_sentiment_analysis():
     """Run market regime analysis without trading"""
@@ -62,6 +61,17 @@ async def run_sentiment_analysis():
         
         analysis_data = json.loads(clean_content)
         
+        # Ensure DB is connected
+        if demo_account.collection is None:
+            await demo_account.initialize()
+
+        log_data = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "market_data": market_data,
+            "analysis": analysis_data
+        }
+        await demo_account.log_sentiment_analysis(log_data)
+        
         return {
             "status": "success",
             "analysis": analysis_data
@@ -105,10 +115,21 @@ class PaperTradingAccount:
             self.db_client = AsyncIOMotorClient(mongo_uri, tlsCAFile=certifi.where())
             self.db = self.db_client.get_database("trading_bot")
             self.collection = self.db.get_collection("account_state")
+            self.sentiment_collection = self.db.get_collection("sentiment_logs")
             logger.info("Connected to MongoDB")
             await self.load_state()
         except Exception as e:
             logger.error(f"Failed to connect to MongoDB: {e}")
+
+    async def log_sentiment_analysis(self, data: Dict[str, Any]):
+        if self.sentiment_collection is None:
+            return
+            
+        try:
+            await self.sentiment_collection.insert_one(data)
+            logger.info("Sentiment Analysis saved to MongoDB")
+        except Exception as e:
+            logger.error(f"Failed to save sentiment analysis: {e}")
 
     async def load_state(self):
         if self.collection is None:

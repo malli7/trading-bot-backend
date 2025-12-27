@@ -58,9 +58,6 @@ def get_account_info():
 def read_root():
     return {"message": "Trading Bot Backend"}
 
-@app.get("/health")
-def health_check():
-    return {"status": "ok"}
 
 if __name__ == "__main__":
     import uvicorn
