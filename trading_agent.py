@@ -263,6 +263,11 @@ class PaperTradingAccount:
     async def execute_trade(self, decision: Dict[str, Any], current_price: float):
         signal = decision.get("signal")
         coin = decision.get("coin")
+
+        # Fallback to last_decision if signal is missing (compatibility fix)
+        if not signal and "last_decision" in decision:
+            signal = decision["last_decision"]
+            logger.info(f"Signal missing for {coin}, using last_decision: {signal}")
         
         if signal in ["buy_to_enter", "sell_to_enter"]:
             if coin in self.positions:

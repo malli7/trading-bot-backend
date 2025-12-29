@@ -183,6 +183,13 @@ Otherwise → "skip_trade"
 - "skip_trade" is a VALID and PREFERRED outcome when edge is unclear
 - Verify all math before output
 - JSON must be valid and complete
+- **JSON OUTPUT MUST INCLUDE A "signal" FIELD** for each decision object.
+- Valid "signal" values are ONLY: 
+  - "buy_to_enter" (Long Entry)
+  - "sell_to_enter" (Short Entry)
+  - "close" (Exit Position)
+  - "hold" (Do Nothing / Maintain Position)
+  - "skip_trade" (No Action / Wait)
 
 ---
 
@@ -259,10 +266,28 @@ Do NOT override lifecycle rules. Update lifecycle values only if your decision c
 ]
 
 ## TASK
-Based on the above data and the provided trade lifecycle memory, produce a **JSON array of trading decisions** in the required format.
+Based on the above data and the provided trade lifecycle memory, produce a **JSON array of trading decisions**.
+
+**REQUIRED JSON FORMAT:**
+```json
+[
+  {
+    "coin": "BTC",
+    "signal": "buy_to_enter",  // or "sell_to_enter", "close", "hold", "skip_trade"
+    "leverage": 3,
+    "stop_loss": 98000.0,
+    "profit_target": 105000.0,
+    "direction": "long",
+    "last_decision": "buy_to_enter",
+    "last_decision_reason": "Price breakout above EMA20..."
+  }
+]
+```
+
 - Update lifecycle fields appropriately if a state change occurs (e.g., bars_in_trade incremented, cooldown_remaining decremented)
 - Do NOT violate position inertia, confirmation, or invalidation rules
 - Default to "hold" if no entry or exit criteria are met
+- **CRITICAL**: You MUST output the `signal` field with one of the valid enum values.
 
 Output only the JSON array, do not include explanations outside the JSON.
 
