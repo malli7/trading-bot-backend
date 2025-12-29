@@ -271,7 +271,7 @@ Based on the above data and the provided trade lifecycle memory, produce a **JSO
 **REQUIRED JSON FORMAT:**
 ```json
 [
-  {
+  {{
     "coin": "BTC",
     "signal": "buy_to_enter",  // or "sell_to_enter", "close", "hold", "skip_trade"
     "leverage": 3,
@@ -280,7 +280,7 @@ Based on the above data and the provided trade lifecycle memory, produce a **JSO
     "direction": "long",
     "last_decision": "buy_to_enter",
     "last_decision_reason": "Price breakout above EMA20..."
-  }
+  }}
 ]
 ```
 
