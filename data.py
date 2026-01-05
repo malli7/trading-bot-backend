@@ -1,50 +1,66 @@
-import time
+"""
+Data Aggregation Module.
+
+This module coordinates fetching raw market data (candles) and transforming it
+into technical indicators for use by the trading agents.
+"""
+import asyncio
+from typing import Dict, Any, List
+
 from candles import get_candles
 from indicators import calculate_all_indicators
 
-async def get_indicators(duration: str, market_id: int, limit: int = 20):
+async def get_indicators(duration: str, market_id: int, limit: int = 20) -> Dict[str, List[float]]:
     """
-    Main entry point for getting standardized indicators.
-    duration: "5m", "1h", "4h"
-    limit: Number of records to return (default 20)
-    Returns dictionary with midPrices, ema20, ema50, rsi7, rsi14, atr14, macd.
-    """
+    Fetch standardized indicators for a specific market and timeframe.
     
+    Args:
+        duration: Timeframe ("15m", "1h", "4h")
+        market_id: Market ID (0=ETH, 1=BTC, 2=SOL)
+        limit: Number of records to return
+        
+    Returns:
+        Dict containing lists of indicator values (midPrices, ema20, rsi14, etc.)
+    """
     # We need enough data for the longest indicator (EMA50) + output limit.
-    # Buffer of 100 is safe for calculation warm-up.
+    # Buffer of 100 is safe for calculation warm-up to converge.
     fetch_limit = limit + 100
     
+    # This is a synchronous call to Lighter SDK (via candles.py), wrapped in async def
+    # Ideally should run in executor if blocking, but HTTP request is fast enough for now
     candles = get_candles(market_id, duration, limit=fetch_limit)
     
     return calculate_all_indicators(candles, output_count=limit)
 
-async def get_full_analysis(market_id: int):
+async def get_full_analysis(market_id: int) -> Dict[str, Any]:
     """
-    Get 20 candles/indicators for 5m, 1h, and 4h timeframes.
-    Returns structured data with symbol and indicators.
+    Fetch comprehensive analysis across multiple timeframes for a single market.
+    
+    Args:
+        market_id: Market ID to analyze.
+        
+    Returns:
+        Dict containing symbol name and a nested dictionary of indicators by timeframe.
     """
-    # Fetch indicators for all timeframes
-    # 20 records requested by user
+    # 20 records requested by user for context window
     limit = 20
     
-    # We could use asyncio.gather for parallelism
-    import asyncio
-    
+    # Run fetches in parallel
     task_15m = get_indicators("15m", market_id, limit)
     task_1h = get_indicators("1h", market_id, limit)
     task_4h = get_indicators("4h", market_id, limit)
     
-    data_15m, data_1h, data_4h = await asyncio.gather(task_15m, task_1h, task_4h)
+    results = await asyncio.gather(task_15m, task_1h, task_4h)
+    data_15m, data_1h, data_4h = results
     
-    # TODO: Fetch real symbol from SDK or map ID
-    # For now, defaulting or using a placeholder until we add lookup
-    symbol = "Unknown"
-    if market_id == 1:
-        symbol = "BTC"
-    elif market_id == 2:
-        symbol = "SOL"
-    elif market_id == 0:
-        symbol = "ETH"
+    # Map ID to Symbol
+    # TODO: Fetch real symbol from SDK or centralized config
+    symbol_map = {
+        0: "ETH",
+        1: "BTC",
+        2: "SOL"
+    }
+    symbol = symbol_map.get(market_id, "Unknown")
     
     return {
         "symbol": symbol,

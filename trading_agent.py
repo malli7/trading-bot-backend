@@ -1,386 +1,189 @@
+"""
+Trading Orchestrator Module.
+
+This module acts as the central coordinator for the automated trading system,
+managing the "Learn -> See -> Feel -> Think -> Decide -> Act" lifecycle.
+"""
 import os
 import json
 import logging
 import asyncio
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any, Tuple, List, Optional
+
 from openai import AsyncOpenAI
-from motor.motor_asyncio import AsyncIOMotorClient
-import certifi
+from dotenv import load_dotenv
+
+# Project Imports
 from data import get_full_analysis
-
-from prompt import SYSTEM_PROMPT, USER_PROMPT, SENTIMENT_SYSTEM_PROMPT, SENTIMENT_USER_PROMPT
-
-async def run_sentiment_analysis():
-    """Run market regime analysis without trading"""
-    
-    # 1. Gather Data
-    market_data, _ = await get_all_market_data()
-    
-    # 2. Format Prompt
-    market_state_str = json.dumps(market_data, default=str)
-    
-    formatted_user_prompt = SENTIMENT_USER_PROMPT.format(
-        ALL_INDICATOR_DATA=market_state_str
-    )
-    
-    full_prompt = [
-        {"role": "system", "content": SENTIMENT_SYSTEM_PROMPT},
-        {"role": "user", "content": formatted_user_prompt}
-    ]
-    
-    # 3. Call AI
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key:
-        logger.error("OPENROUTER_API_KEY not found in env")
-        return {"status": "error", "message": "Missing API Key"}
-        
-    client = AsyncOpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=api_key,
-    )
-    
-    model = "google/gemini-2.5-flash-lite"
-    
-    try:
-        completion = await client.chat.completions.create(
-            model=model,
-            messages=full_prompt,
-            temperature=0.1
-        )
-        
-        response_content = completion.choices[0].message.content
-        logger.info(f"Sentiment Analysis Provided")
-        
-        # 4. Parse Decision
-        clean_content = response_content.strip()
-        if clean_content.startswith("```json"):
-            clean_content = clean_content[7:]
-        if clean_content.endswith("```"):
-            clean_content = clean_content[:-3]
-        
-        analysis_data = json.loads(clean_content)
-        
-        # Ensure DB is connected
-        if demo_account.collection is None:
-            await demo_account.initialize()
-
-        log_data = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "market_data": market_data,
-            "analysis": analysis_data
-        }
-        await demo_account.log_sentiment_analysis(log_data)
-        
-        return {
-            "status": "success",
-            "analysis": analysis_data
-        }
-        
-    except Exception as e:
-        logger.exception("Error in sentiment analysis cycle")
-        return {"status": "error", "message": str(e)}
+from account import demo_account
+from agents.reflection import ReflectionAgent
+from agents.swarm import SwarmAnalyst
+from agents.portfolio import PortfolioManager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Constants
-INITIAL_BALANCE = 1000.0
-MARKET_IDS = {
-    "ETH": 0,
-    "BTC": 1,
-    "SOL": 2
-}
+# Load environment variables
+load_dotenv()
 
-class PaperTradingAccount:
-    def __init__(self, initial_balance: float = INITIAL_BALANCE):
-        self.initial_balance = initial_balance
-        self.cash = initial_balance
-        self.positions: Dict[str, Dict[str, Any]] = {} 
-        self.history: List[Dict[str, Any]] = []
-        self.db_client = None
-        self.db = None
-        self.collection = None
-        # DO NOT load state in __init__ as it requires async
-
-    async def initialize(self):
-        """Initialize MongoDB connection and load state"""
-        mongo_uri = os.getenv("MONGO_URI")
-        if not mongo_uri:
-            logger.error("MONGO_URI not found in env")
-            return
-
-        try:
-            self.db_client = AsyncIOMotorClient(mongo_uri, tlsCAFile=certifi.where())
-            self.db = self.db_client.get_database("trading_bot")
-            self.collection = self.db.get_collection("account_state")
-            self.sentiment_collection = self.db.get_collection("sentiment_logs")
-            logger.info("Connected to MongoDB")
-            await self.load_state()
-        except Exception as e:
-            logger.error(f"Failed to connect to MongoDB: {e}")
-
-    async def log_sentiment_analysis(self, data: Dict[str, Any]):
-        if self.sentiment_collection is None:
-            return
-            
-        try:
-            await self.sentiment_collection.insert_one(data)
-            logger.info("Sentiment Analysis saved to MongoDB")
-        except Exception as e:
-            logger.error(f"Failed to save sentiment analysis: {e}")
-
-    async def load_state(self):
-        if self.collection is None:
-            return
-
-        try:
-            # We use a fixed ID for the single account
-            data = await self.collection.find_one({"_id": "account_main"})
-            if data:
-                self.cash = float(data.get("cash", self.initial_balance))
-                self.positions = data.get("positions", {})
-                self.history = data.get("history", [])
-                logger.info("Account state loaded from MongoDB")
-            else:
-                logger.info("No existing account state found, starting fresh.")
-                await self.save_state()
-        except Exception as e:
-            logger.error(f"Failed to load state from DB: {e}")
-
-    async def save_state(self):
-        if self.collection is None:
-            return
-
-        try:
-            data = {
-                "_id": "account_main",
-                "cash": self.cash,
-                "positions": self.positions,
-                "history": self.history,
-                "last_updated": datetime.utcnow().isoformat()
-            }
-            await self.collection.replace_one({"_id": "account_main"}, data, upsert=True)
-        except Exception as e:
-            logger.error(f"Failed to save state to DB: {e}")
-
-    @property
-    def total_value(self) -> float:
-        margin_used = sum(p['margin'] for p in self.positions.values())
-        unrealized_pnl = sum(p.get('unrealized_pnl', 0) for p in self.positions.values())
-        return self.cash + margin_used + unrealized_pnl
-
-    @property
-    def total_return_pct(self) -> float:
-        return ((self.total_value - self.initial_balance) / self.initial_balance) * 100.0
-
-    def get_positions_str(self) -> str:
-        if not self.positions:
-            return "no open positions"
-        
-        pos_strings = []
-        for symbol, pos in self.positions.items():
-            unrealized = pos.get('unrealized_pnl', 0.0)
-            p_str = (f"Symbol: {symbol} Side: {pos['sign']} Entry: {pos['entry_price']} "
-                     f"Lev: {pos['leverage']}x Margin: {pos['margin']:.2f} Unr. PNL: {unrealized:.2f}")
-            pos_strings.append(p_str)
-        return ", ".join(pos_strings)
-
-    async def close_position(self, coin: str, current_price: float, reason: str = "SIGNAL"):
-        if coin not in self.positions:
-            return
-            
-        pos = self.positions.pop(coin)
-        margin = pos['margin']
-        entry = pos['entry_price']
-        qty = pos['quantity']
-        
-        if pos['sign'] == "LONG":
-            pnl = (current_price - entry) * qty
-        else:
-            pnl = (entry - current_price) * qty
-            
-        returned_amount = margin + pnl
-        self.cash += returned_amount
-        
-        logger.info(f"Closed {coin} ({reason}). PnL: {pnl:.2f}. New Balance: {self.cash:.2f}")
-        self.history.append({
-            "action": "close", 
-            "coin": coin, 
-            "price": current_price, 
-            "pnl": pnl, 
-            "reason": reason,
-            "time": datetime.utcnow().isoformat(), 
-            "result": "CLOSED"
-        })
-        await self.save_state()
-
-    async def update_positions(self, current_prices: Dict[str, float]):
-        """Update PnL and check for Stops/Take Profits"""
-        state_changed = False
-        # Iterate over a copy since we might modify the dict (close positions)
-        for symbol, pos in list(self.positions.items()):
-            if symbol in current_prices:
-                curr = current_prices[symbol]
-                entry = pos['entry_price']
-                qty = pos['quantity']
-                
-                if pos['sign'] == "LONG":
-                    unrealized = (curr - entry) * qty
-                else:
-                    unrealized = (entry - curr) * qty
-                
-                if pos.get('unrealized_pnl') != unrealized:
-                    pos['unrealized_pnl'] = unrealized
-                    state_changed = True
-                
-                # Check Stop Loss
-                sl = pos.get('stop_loss')
-                if sl:
-                    if pos['sign'] == "LONG" and curr <= sl:
-                        await self.close_position(symbol, curr, reason="STOP_LOSS")
-                        continue
-                    elif pos['sign'] == "SHORT" and curr >= sl:
-                        await self.close_position(symbol, curr, reason="STOP_LOSS")
-                        continue
-                
-                # Check Take Profit
-                tp = pos.get('take_profit')
-                if tp:
-                    if pos['sign'] == "LONG" and curr >= tp:
-                         await self.close_position(symbol, curr, reason="TAKE_PROFIT")
-                         continue
-                    elif pos['sign'] == "SHORT" and curr <= tp:
-                         await self.close_position(symbol, curr, reason="TAKE_PROFIT")
-                         continue
-        
-        # Save if PnL updated usually fine, or just on close. 
-        # Persistence of PnL is nice for UI to see it without re-fetch.
-        if state_changed:
-            await self.save_state()
-
-    async def execute_trade(self, decision: Dict[str, Any], current_price: float):
-        signal = decision.get("signal")
-        coin = decision.get("coin")
-
-        # Fallback to last_decision if signal is missing (compatibility fix)
-        if not signal and "last_decision" in decision:
-            signal = decision["last_decision"]
-            logger.info(f"Signal missing for {coin}, using last_decision: {signal}")
-        
-        if signal in ["buy_to_enter", "sell_to_enter"]:
-            if coin in self.positions:
-                logger.warning(f"Position already exists for {coin}, skipping {signal}")
-                return
-            
-            # Position Sizing Logic (Auto-Calculated)
-            leverage = int(decision.get("leverage", 1))
-            stop_loss = decision.get("stop_loss")
-            
-            # 1. Validation
-            if not stop_loss:
-                logger.warning(f"Stop Loss missing for {coin}, cannot calculate risk. Skipping.")
-                return
-
-            entry_price = current_price
-            
-            # 2. Risk-Based Sizing
-            # Risk per share = |Entry - StopLoss|
-            risk_per_share = abs(entry_price - float(stop_loss))
-            if risk_per_share == 0:
-                logger.warning("Stop loss equals entry price, invalid.")
-                return
-
-            # Max Risk Allowed = 2% of Total Account Value
-            # Using total_value is better than cash for portfolio sizing
-            account_value = self.total_value
-            max_risk_allowed = account_value * 0.02
-            
-            qty_risk = max_risk_allowed / risk_per_share
-            
-            # 3. Margin-Based Sizing
-            # Max Margin Allowed = 20% of Total Account Value
-            max_margin_allowed = account_value * 0.20
-            
-            # Position Value = Margin * Leverage
-            max_position_value = max_margin_allowed * leverage
-            
-            qty_margin = max_position_value / entry_price
-            
-            # 4. Cash Constraint (Hard Limit)
-            # Can't spend more cash than we have
-            qty_cash = (self.cash * leverage) / entry_price
-
-            # 5. Final Quantity
-            # We take the minimum of all constraints
-            quantity = min(qty_risk, qty_margin, qty_cash)
-            
-            if quantity <= 0:
-                logger.warning(f"Calculated quantity is {quantity}, skipping.")
-                return
-
-            # Recalculate margin required for the final quantity
-            position_value_usd = quantity * current_price
-            margin_required = position_value_usd / leverage
-            
-            # Double check cash just in case rounding issues
-            if margin_required > self.cash:
-                 # Adjust slightly if floating point error
-                 quantity = (self.cash * leverage) / current_price
-                 margin_required = self.cash
-
-            self.cash -= margin_required
-            
-            self.positions[coin] = {
-                "sign": "LONG" if signal == "buy_to_enter" else "SHORT",
-                "entry_price": current_price,
-                "quantity": quantity,
-                "leverage": leverage,
-                "margin": margin_required,
-                "stop_loss": stop_loss,
-                "take_profit": decision.get("profit_target"),
-                "unrealized_pnl": 0.0,
-                "timestamp": datetime.utcnow().isoformat()
-            }
-            
-            logger.info(f"Executed {signal} on {coin}. "
-                        f"Price: {current_price}, Qty: {quantity:.4f}, Lev: {leverage}x. "
-                        f"Margin: {margin_required:.2f} (Limit: {max_margin_allowed:.2f}). "
-                        f"Risk: {risk_per_share*quantity:.2f} (Limit: {max_risk_allowed:.2f})")
-                        
-            self.history.append({"action": signal, "coin": coin, "price": current_price, "time": datetime.utcnow().isoformat(), "result": "OPEN"})
-            await self.save_state()
-
-        elif signal == "close":
-             await self.close_position(coin, current_price, reason="SIGNAL")
-
-        else:
-            logger.info(f"Signal: {signal} for {coin} - No action taken")
-
-# Global Account Instance
-demo_account = PaperTradingAccount()
-
-async def get_all_market_data():
-    """Fetch data for all tracked markets"""
-    import asyncio
+class TradingOrchestrator:
+    """
+    Coordinator class that manages the agentic workflow.
     
-    # IDs defined in data.py logic: ETH=0, BTC=1, SOL=2
-    ids = [(0, "ETH"), (1, "BTC"), (2, "SOL")]
+    Attributes:
+        reflection (ReflectionAgent): Analyzes past performance.
+        swarm (SwarmAnalyst): Generates trading signals via consensus.
+        portfolio (PortfolioManager): Manages risk and allocation.
+        client (AsyncOpenAI): LLM client for sentiment analysis.
+    """
     
-    tasks = [get_full_analysis(mid) for mid, _ in ids]
+    def __init__(self):
+        self.reflection = ReflectionAgent()
+        self.swarm = SwarmAnalyst()
+        self.portfolio = PortfolioManager()
+        
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key:
+            logger.warning("OPENROUTER_API_KEY not found in environment.")
+            
+        self.client = AsyncOpenAI(
+             base_url="https://openrouter.ai/api/v1",
+             api_key=api_key
+        )
+
+    async def run_cycle(self) -> Dict[str, Any]:
+        """
+        Executes a full trading cycle.
+
+        Steps:
+        1. **Reflection**: Review past decisions and learn lessons.
+        2. **Data Collection**: Fetch current market data and prices.
+        3. **Sentiment**: Analyze macro sentiment (Fear/Greed).
+        4. **Swarm Analysis**: Generate signals (Buy/Sell/Hold) for each token.
+        5. **Portfolio**: Allocate capital based on confidence and risk.
+        6. **Execution**: Execute validated orders.
+
+        Returns:
+            Dict[str, Any]: Summary of the cycle execution.
+        """
+        logger.info("=== Starting Trading Cycle ===")
+        
+        # 2. Data Collection (See)
+        market_data, current_prices = await get_all_market_data()
+        
+        # 1. Reflection (Learn) - Uses current prices to judge past decisions
+        await self.reflection.review_performance(current_prices)
+        
+        # Update PnL in Account
+        await demo_account.update_positions(current_prices)
+        
+        # 3. Sentiment Analysis (Feel)
+        sentiment = await self.get_sentiment(market_data)
+        
+        # 4. Swarm Analysis (Think)
+        decisions: List[Dict[str, Any]] = []
+        
+        for symbol, data in market_data.items():
+            if symbol not in current_prices:
+                continue
+            
+            logger.info(f"Analyzing {symbol}...")
+            
+            # A. Swarm Vote
+            swarm_result = await self.swarm.get_consensus(data, sentiment)
+            # swarm_result example: { "signal": "BUY", "confidence": 85.0, "rationale": "..." }
+            
+            # B. Portfolio Allocation (Decide)
+            current_price = current_prices[symbol]
+            current_position = demo_account.positions.get(symbol)
+            
+            decision = self.portfolio.allocate(
+                signal=swarm_result["signal"], 
+                confidence=swarm_result["confidence"], 
+                coin=symbol, 
+                price=current_price,
+                current_position=current_position,
+                swarm_reason=swarm_result.get("rationale"),
+                swarm_invalidation=swarm_result.get("invalidation")
+            )
+            
+            # Always append decision for transparency & Logging
+            decisions.append(decision)
+            await demo_account.log_decision(decision)
+            
+        # 5. Execution (Act)
+        for dec in decisions:
+            if dec["signal"] not in ["skip_trade", "HOLD"]:
+                current_price = current_prices.get(dec["coin"], 0.0)
+                if current_price > 0:
+                     await demo_account.execute_trade(dec, current_price)
+                 
+        return {
+            "status": "success",
+            "decisions": decisions,
+            "account": {
+                "balance": demo_account.cash,
+                "positions": len(demo_account.positions)
+            }
+        }
+
+    async def get_sentiment(self, market_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Analyzes market sentiment using a lightweight LLM model.
+        
+        Args:
+            market_data: Dictionary of market indicators.
+            
+        Returns:
+            Dict[str, Any]: Sentiment analysis result (e.g. {"text": "BULLISH"}).
+        """
+        try:
+             # Truncate data to save context window/costs
+             # Only show last 5 hours of prices
+             summary = {
+                 k: v['1h']['midPrices'][-5:] 
+                 for k, v in market_data.items() 
+                 if '1h' in v
+             }
+             
+             completion = await self.client.chat.completions.create(
+                 model="google/gemini-2.0-flash-001",
+                 messages=[
+                     {"role": "system", "content": "Analyze market sentiment (BULLISH/BEARISH/NEUTRAL) based on recent prices."},
+                     {"role": "user", "content": json.dumps(summary)}
+                 ]
+             )
+             return {"text": completion.choices[0].message.content}
+        except Exception as e:
+             logger.warning(f"Sentiment analysis failed: {e}")
+             return {"text": "Neutral"}
+
+# Helpers
+async def get_all_market_data() -> Tuple[Dict[str, Any], Dict[str, float]]:
+    """
+    Fetches comprehensive market data for all tracked assets.
+    
+    bReturns:
+        Tuple containing:
+        - market_data (Dict): full technical analysis
+        - prices (Dict): current prices map
+    """
+    # Asset definition: (MarketID, Symbol)
+    # IDs correspond to data.py logic: ETH=0, BTC=1, SOL=2
+    assets = [(0, "ETH"), (1, "BTC"), (2, "SOL")]
+    
+    tasks = [get_full_analysis(mid) for mid, _ in assets]
     results = await asyncio.gather(*tasks)
-    
-    # Results is a list of dicts: { "symbol": "BTC", "indicator_data": {...} }
-    # We want a dict: { "BTC": { ... }, "ETH": { ... } }
     
     all_data = {}
     prices = {}
     
     for res in results:
         symbol = res['symbol']
-        # Try to extract current price from the latest 5m midPrice
         try:
+            # We use the close of the last 15m candle as 'current price' reference
             current_price = res['indicator_data']['15m']['midPrices'][-1]
             prices[symbol] = current_price
         except (KeyError, IndexError):
@@ -390,97 +193,18 @@ async def get_all_market_data():
         
     return all_data, prices
 
-async def run_agent_cycle():
-    """Main function to run one trading cycle"""
-    
-    # Ensure DB is initialized if not already
+# Global Orchestrator Instance
+orchestrator = TradingOrchestrator()
+
+async def run_agent_cycle() -> Dict[str, Any]:
+    """
+    Main entry point hook for the API.
+    Ensures DB is ready before running the cycle.
+    """
+    # Ideally initialize should be called at app startup (which we do now in main.py)
+    # But double check here for safety.
     if demo_account.collection is None:
         await demo_account.initialize()
-
-    # 1. Gather Data
-    market_data, current_prices = await get_all_market_data()
-    
-    # Update positions with new prices
-    await demo_account.update_positions(current_prices)
-    
-    # 2. Format Prompt
-    # Need to make sure json dumping handles standard types
-    market_state_str = json.dumps(market_data, default=str)
-    
-    formatted_user_prompt = USER_PROMPT.format(
-        ALL_INDICATOR_DATA=market_state_str,
-        TOTAL_RETURN=f"{demo_account.total_return_pct:.2f}",
-        AVAILABLE_CASH=f"${demo_account.cash:.2f}",
-        ACCOUNT_VALUE=f"${demo_account.total_value:.2f}",
-        OPEN_POSITIONS=demo_account.get_positions_str()
-    )
-    
-    full_prompt = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": formatted_user_prompt}
-    ]
-    
-    # 3. Call AI
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key:
-        logger.error("OPENROUTER_API_KEY not found in env")
-        return {"status": "error", "message": "Missing API Key"}
         
-    client = AsyncOpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=api_key,
-    )
-    
-    #model = "nex-agi/deepseek-v3.1-nex-n1:free"
-    #model = "xiaomi/mimo-v2-flash:free" 
-    model = "google/gemini-2.5-flash-lite" 
-    
-    try:
-        completion = await client.chat.completions.create(
-            model=model,
-            messages=full_prompt,
-            temperature=0.1
-        )
-        
-        response_content = completion.choices[0].message.content
-        logger.info(f"AI Response provided")
-        
-        # 4. Parse Decision
-        # Handles potential markdown code blocks
-        clean_content = response_content.strip()
-        if clean_content.startswith("```json"):
-            clean_content = clean_content[7:]
-        if clean_content.endswith("```"):
-            clean_content = clean_content[:-3]
-        
-        decision_data = json.loads(clean_content)
-        
-        # Ensure it is a list
-        decisions = []
-        if isinstance(decision_data, dict):
-             decisions = [decision_data]
-        elif isinstance(decision_data, list):
-             decisions = decision_data
-        else:
-             logger.warning("Unknown decision format")
-        
-        results = []
-        for decision in decisions:
-            target_coin = decision.get("coin")
-            if target_coin and target_coin in current_prices:
-                await demo_account.execute_trade(decision, current_prices[target_coin])
-                results.append(decision)
-        
-        return {
-            "status": "success", 
-            "decisions": results, 
-            "account_summary": {
-                "cash": demo_account.cash,
-                "positions": demo_account.positions
-            }
-        }
-        
-    except Exception as e:
-        logger.exception("Error in trading cycle")
-        return {"status": "error", "message": str(e)}
+    return await orchestrator.run_cycle()
 
