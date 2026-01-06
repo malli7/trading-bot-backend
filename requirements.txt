@@ -6,3 +6,4 @@ openai
 motor
 gunicorn
 certifi
+pydantic-settings

@@ -42,3 +42,9 @@ venv.bak/
 # IDEs
 .vscode
 .idea
+
+# Backtest Data & Results
+backtest/results/
+backtest/data_cache/
+backend/backtest/results/
+backend/backtest/data_cache/

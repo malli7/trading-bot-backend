@@ -2,22 +2,22 @@
 Trading Bot API Main Entry Point.
 
 This module initializes the FastAPI application, configures CORS,
-and defines the API endpoints for market data, analysis, and trade execution.
+and defines the API endpoints using the Refactored Services.
 """
 from contextlib import asynccontextmanager
-import os
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
 
-# Project Imports
+# Core Imports
+from core.config import settings
+from core.schemas import CycleResult, IndicatorResponse, AnalysisResponse
+
+# Service Imports
 from data import get_indicators, get_full_analysis
-from trading_agent import run_agent_cycle, demo_account
-
-# Load environment variables
-load_dotenv()
+from account import demo_account
+from services.orchestrator import run_agent_cycle
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -27,14 +27,14 @@ async def lifespan(app: FastAPI):
     """
     await demo_account.initialize()
     yield
-    # Cleanup logic if needed (e.g. close DB connection)
-    # if demo_account.db_client: demo_account.db_client.close()
+    # Cleanup logic if needed
 
 app = FastAPI(
-    title="Trading Bot API",
-    description="API for Agentic Trading Bot with Swarm Intelligence",
-    version="2.0.0",
-    lifespan=lifespan
+    title=settings.APP_NAME,
+    description="API for Agentic Trading Bot with Swarm Intelligence (v2)",
+    version="2.1.0",
+    lifespan=lifespan,
+    debug=settings.DEBUG
 )
 
 app.add_middleware(
@@ -66,6 +66,8 @@ async def trade_decision() -> Dict[str, Any]:
     4. Portfolio Allocation
     5. Execution
     """
+    # run_agent_cycle now returns a Dict compatible with CycleResult schema
+    # But for now we keep Dict[str, Any] as response model to be safe until we verify schema match perfectly
     result = await run_agent_cycle()
     return result
 
@@ -82,7 +84,7 @@ def get_account_info() -> Dict[str, Any]:
 @app.get("/")
 def read_root() -> Dict[str, str]:
     """Health check endpoint."""
-    return {"message": "Trading Bot Backend Operational"}
+    return {"message": f"{settings.APP_NAME} Operational"}
 
 if __name__ == "__main__":
     import uvicorn

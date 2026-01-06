@@ -20,6 +20,7 @@ from account import demo_account
 from agents.reflection import ReflectionAgent
 from agents.swarm import SwarmAnalyst
 from agents.portfolio import PortfolioManager
+from agents.risk_manager import RiskAssessmentAgent
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -36,6 +37,7 @@ class TradingOrchestrator:
         reflection (ReflectionAgent): Analyzes past performance.
         swarm (SwarmAnalyst): Generates trading signals via consensus.
         portfolio (PortfolioManager): Manages risk and allocation.
+        risk_agent (RiskAssessmentAgent): Final check for sizing & leverage.
         client (AsyncOpenAI): LLM client for sentiment analysis.
     """
     
@@ -43,6 +45,7 @@ class TradingOrchestrator:
         self.reflection = ReflectionAgent()
         self.swarm = SwarmAnalyst()
         self.portfolio = PortfolioManager()
+        self.risk_agent = RiskAssessmentAgent()
         
         api_key = os.getenv("OPENROUTER_API_KEY")
         if not api_key:
@@ -62,8 +65,9 @@ class TradingOrchestrator:
         2. **Data Collection**: Fetch current market data and prices.
         3. **Sentiment**: Analyze macro sentiment (Fear/Greed).
         4. **Swarm Analysis**: Generate signals (Buy/Sell/Hold) for each token.
-        5. **Portfolio**: Allocate capital based on confidence and risk.
-        6. **Execution**: Execute validated orders.
+        5. **Portfolio**: Format initial decision (Direction).
+        6. **Risk Assessment**: AI Agent determines Sizing, Leverage, SL/TP.
+        7. **Execution**: Execute validated orders.
 
         Returns:
             Dict[str, Any]: Summary of the cycle execution.
@@ -73,45 +77,45 @@ class TradingOrchestrator:
         # 2. Data Collection (See)
         market_data, current_prices = await get_all_market_data()
         
-        # 1. Reflection (Learn) - Uses current prices to judge past decisions
-        await self.reflection.review_performance(current_prices)
-        
-        # Update PnL in Account
+        # UPDATE ACCOUNT STATE (P&L, Stop Loss, Take Profit)
+        # We must do this before making any new decisions.
         await demo_account.update_positions(current_prices)
+
         
-        # 3. Sentiment Analysis (Feel)
-        sentiment = await self.get_sentiment(market_data)
+        # 1. Reflection (Learn) & 3. Sentiment (Feel) - Parallel Execution
+        # We run these together to save time. Swarm needs Sentiment, but not necessarily instant Reflection (though we wait for it to keep logic simple).
+        reflection_task = asyncio.create_task(self.reflection.review_performance(current_prices))
+        sentiment_task = asyncio.create_task(self.get_sentiment(market_data))
+        
+        # Wait for both (Reflection updates DB for Swarm to potentially use, though we could optimize this further)
+        await reflection_task
+        sentiment = await sentiment_task
         
         # 4. Swarm Analysis (Think)
         decisions: List[Dict[str, Any]] = []
         
+        # 4. Swarm Analysis (Think) & Decision Making
+        decisions: List[Dict[str, Any]] = []
+
+        # Create tasks for all assets to run in parallel
+        asset_tasks = []
         for symbol, data in market_data.items():
             if symbol not in current_prices:
                 continue
             
-            logger.info(f"Analyzing {symbol}...")
-            
-            # A. Swarm Vote
-            swarm_result = await self.swarm.get_consensus(data, sentiment)
-            # swarm_result example: { "signal": "BUY", "confidence": 85.0, "rationale": "..." }
-            
-            # B. Portfolio Allocation (Decide)
-            current_price = current_prices[symbol]
-            current_position = demo_account.positions.get(symbol)
-            
-            decision = self.portfolio.allocate(
-                signal=swarm_result["signal"], 
-                confidence=swarm_result["confidence"], 
-                coin=symbol, 
-                price=current_price,
-                current_position=current_position,
-                swarm_reason=swarm_result.get("rationale"),
-                swarm_invalidation=swarm_result.get("invalidation")
+            asset_tasks.append(
+                self._process_asset(symbol, data, sentiment, current_prices)
             )
-            
-            # Always append decision for transparency & Logging
-            decisions.append(decision)
-            await demo_account.log_decision(decision)
+
+        # Execute all asset analysis in parallel
+        logger.info(f"Analyzing {len(asset_tasks)} assets in parallel...")
+        asset_results = await asyncio.gather(*asset_tasks)
+        
+        # Collect non-None results
+        for res in asset_results:
+            if res:
+                decisions.append(res)
+                await demo_account.log_decision(res)
             
         # 5. Execution (Act)
         for dec in decisions:
@@ -128,6 +132,69 @@ class TradingOrchestrator:
                 "positions": len(demo_account.positions)
             }
         }
+
+    async def _process_asset(
+        self, 
+        symbol: str, 
+        data: Dict[str, Any], 
+        sentiment: Dict[str, Any], 
+        current_prices: Dict[str, float]
+    ) -> Dict[str, Any]:
+        """
+        Helper to process a single asset: Swarm -> Portfolio -> Risk Agent.
+        """
+        logger.info(f"Analyzing {symbol}...")
+        
+        # A. Portfolio Context
+        current_price = current_prices[symbol]
+        current_position = demo_account.positions.get(symbol)
+        
+        # B. Swarm Vote (Now Context Aware)
+        swarm_result = await self.swarm.get_consensus(data, sentiment, current_position)
+        
+        # C. Portfolio Allocation (Decide Direction)
+        
+        decision = self.portfolio.allocate(
+            signal=swarm_result["signal"], 
+            confidence=swarm_result["confidence"], 
+            coin=symbol, 
+            price=current_price,
+            current_position=current_position,
+            swarm_reason=swarm_result.get("rationale"),
+            swarm_invalidation=swarm_result.get("invalidation")
+        )
+
+        # C. AI Risk Assessment (The Risk Officer) - ONLY for NEW trades
+        if decision["signal"] in ["buy_to_enter", "sell_to_enter"]:
+            logger.info(f"Sending {symbol} setup to Risk Agent for validation...")
+            
+            risk_decision = await self.risk_agent.assess_risk(
+                signal=decision["signal"],
+                symbol=symbol,
+                current_price=current_price,
+                swarm_reasoning=swarm_result.get("rationale"),
+                swarm_confidence=swarm_result.get("confidence"),
+                market_data=data, # Pass technicals for context
+                account_equity=demo_account.total_value
+            )
+            
+            if risk_decision.get("signal") == "REJECTED":
+                # Risk Agent vetoed the trade
+                logger.warning(f"Risk Agent REJECTED {symbol}: {risk_decision.get('reasoning')}")
+                decision["signal"] = "HOLD"
+                decision["reason"] = f"Risk Agent Veto: {risk_decision.get('reasoning')}"
+            else:
+                # Risk Agent approved - Apply Overrides
+                logger.info(f"Risk Agent APPROVED {symbol}. Lev: {risk_decision.get('leverage')}x. Size: ${risk_decision.get('position_size_usd')}")
+                decision.update({
+                    "leverage": risk_decision.get("leverage", decision["leverage"]),
+                    "stop_loss": risk_decision.get("stop_loss", decision["stop_loss"]),
+                    "take_profit": risk_decision.get("take_profit", decision["profit_target"]),
+                    "position_size_usd": risk_decision.get("position_size_usd"), # Passed to account.py
+                    "reason": f"{decision['reason']} | Risk Officer: {risk_decision.get('reasoning')}"
+                })
+
+        return decision
 
     async def get_sentiment(self, market_data: Dict[str, Any]) -> Dict[str, Any]:
         """

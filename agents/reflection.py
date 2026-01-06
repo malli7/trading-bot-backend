@@ -65,6 +65,7 @@ class ReflectionAgent:
         # 2. Analyze
         # Track coins we've already generated a lesson for in this cycle to avoid dupes
         reviewed_coins: Set[str] = set()
+        tasks = []
         
         for dec in decisions:
             coin = dec.get("coin")
@@ -90,6 +91,10 @@ class ReflectionAgent:
             # Unique ID = Timestamp + Coin + Signal
             decision_id = f"{dec['timestamp']}_{coin}_{dec['signal']}"
             
+            # We must await the DB check here to avoid scheduling unnecessary tasks
+            # This is a small performance hit but saves LLM calls. 
+            # Alternatively, we could optimistically schedule and check inside the task, 
+            # but that might waste LLM tokens if we don't check first.
             existing = await demo_account.lessons_collection.find_one({"source_decision_id": decision_id})
             if existing:
                 logger.debug(f"Skipping reviewed decision: {decision_id}")
@@ -104,18 +109,31 @@ class ReflectionAgent:
             
             # Threshold: If we missed a > 1.5% move
             if pnl_pct > 1.5:
-                # Potential Missed Pump
-                outcome = "Missed Opportunity (Price Rallied)"
-                action = dec.get("signal")
-                reason = dec.get("reason", "Unknown")
+                reviewed_coins.add(coin) # Mark as handled for this batch
                 
-                lesson = await self._generate_lesson(action, coin, old_price, reason, curr_price, pnl_pct, outcome)
-                
-                if lesson and "No lesson" not in lesson:
-                     clean_lesson = lesson.replace("Lesson: ", "").strip()
-                     logger.info(f"Generated Lesson for {coin}: {clean_lesson}")
-                     await demo_account.save_lesson(clean_lesson, source_decision_id=decision_id)
-                     reviewed_coins.add(coin)
+                # Create Task
+                tasks.append(
+                    self._process_single_lesson(
+                         dec, coin, old_price, curr_price, pnl_pct, decision_id
+                    )
+                )
+
+        if tasks:
+            logger.info(f"Reflection Agent: Generating {len(tasks)} lessons in parallel...")
+            await asyncio.gather(*tasks)
+
+    async def _process_single_lesson(self, dec, coin, old_price, curr_price, pnl_pct, decision_id):
+        """Helper to generate and save a lesson."""
+        outcome = "Missed Opportunity (Price Rallied)"
+        action = dec.get("signal")
+        reason = dec.get("reason", "Unknown")
+        
+        lesson = await self._generate_lesson(action, coin, old_price, reason, curr_price, pnl_pct, outcome)
+        
+        if lesson and "No lesson" not in lesson:
+                clean_lesson = lesson.replace("Lesson: ", "").strip()
+                logger.info(f"Generated Lesson for {coin}: {clean_lesson}")
+                await demo_account.save_lesson(clean_lesson, source_decision_id=decision_id)
 
     async def _generate_lesson(
         self, 

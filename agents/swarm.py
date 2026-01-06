@@ -41,13 +41,14 @@ class SwarmAnalyst:
             {"id": "meta-llama/llama-3.1-70b-instruct", "role": "Pattern Recognition Specialist"},
         ]
 
-    async def get_consensus(self, market_data: Dict[str, Any], sentiment: Dict[str, Any]) -> Dict[str, Any]:
+    async def get_consensus(self, market_data: Dict[str, Any], sentiment: Dict[str, Any], current_position: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Query all models in parallel and aggregate votes via Master LLM.
         
         Args:
             market_data: Technical indicators for the asset.
             sentiment: Macro market sentiment.
+            current_position: Existing position info (or None).
             
         Returns:
             Dict containing 'signal', 'confidence', 'rationale', and 'invalidation'.
@@ -56,13 +57,22 @@ class SwarmAnalyst:
         lessons = await demo_account.get_recent_lessons()
         lessons_str = "\n- ".join(lessons) if lessons else "None"
         
+        # Format Position Context for LLM
+        if current_position:
+            pos_str = f"{current_position['sign']} ({current_position['quantity']} units) @ ${current_position['entry_price']:.2f}"
+            pnl_pct = ((current_position.get('current_price', 0) - current_position['entry_price']) / current_position['entry_price']) * 100
+            if current_position['sign'] == "SHORT": pnl_pct *= -1
+            pos_str += f" | PnL: {pnl_pct:.2f}%"
+        else:
+            pos_str = "NONE (Flat)"
+
         # 2. Prepare Tasks
         tasks = []
         market_str = json.dumps(market_data, default=str)
         sentiment_str = json.dumps(sentiment, default=str)
         
         for model_cfg in self.models:
-            tasks.append(self._query_model(model_cfg, market_str, sentiment_str, lessons_str))
+            tasks.append(self._query_model(model_cfg, market_str, sentiment_str, lessons_str, pos_str))
             
         # 3. Gather Results
         results = await asyncio.gather(*tasks)
@@ -159,13 +169,14 @@ class SwarmAnalyst:
             "invalidation": "Aggregation Failed"
         }
 
-    async def _query_model(self, model_cfg: Dict[str, str], market_data: str, sentiment: str, lessons: str) -> Optional[Dict[str, Any]]:
+    async def _query_model(self, model_cfg: Dict[str, str], market_data: str, sentiment: str, lessons: str, pos_str: str) -> Optional[Dict[str, Any]]:
         """Query a single Swarm Agent."""
         prompt = SWARM_PROMPT.format(
             role_name=model_cfg["role"],
             market_data=market_data,
             sentiment=sentiment,
-            lessons=lessons
+            lessons=lessons,
+            position=pos_str
         )
         
         try:

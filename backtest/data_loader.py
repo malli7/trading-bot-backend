@@ -87,48 +87,105 @@ class DataLoader:
         start = now - (limit * sec)
         
         try:
-            # Call the CustomApi instance from candles.py
-            # It returns the raw dict response from the server
-            response = api.get_candles(
-                market_id=market_id,
-                resolution=res_str,
-                timestamp_start=start,
-                timestamp_end=now,
-                count_back=limit
-            )
+            # Pagination Logic
+            collected_candles = []
+            remaining = limit
+            current_end = now
             
-            # Parse it
-            items = []
-            if isinstance(response, dict):
-                if 'c' in response: items = response['c']
-                elif 'candlesticks' in response: items = response['candlesticks']
-                elif 'candles' in response: items = response['candles']
-            elif isinstance(response, list):
-                 items = response
+            chunk_size = 500 # Safe max for API
             
-            formatted = []
-            for c in items:
-                if isinstance(c, dict) and 't' in c:
-                     formatted.append({
-                        "timestamp": c['t'] / 1000.0,
-                        "open": float(c.get("o", 0)),
-                        "high": float(c.get("h", 0)),
-                        "low": float(c.get("l", 0)),
-                        "close": float(c.get("c", 0)),
-                        "volume": float(c.get("v", 0))
-                     })
-                elif isinstance(c, dict) and 'timestamp' in c:
-                    formatted.append({
-                        "timestamp": c['timestamp'],
-                        "open": float(c.get("open", 0)),
-                        "high": float(c.get("high", 0)),
-                        "low": float(c.get("low", 0)),
-                        "close": float(c.get("close", 0)),
-                         "volume": float(c.get("volume", 0))
-                    })
+            while len(collected_candles) < limit:
+                count = min(remaining, chunk_size)
+                # Ensure we ask for at least a few, or just ask for chunk_size and filter later
+                count = chunk_size 
+                
+                # We need to calculate start for THIS chunk loosely
+                # But get_candles uses (start, end, count_back) priorities.
+                # Use a wide window for start to ensure count_back works
+                chunk_start = current_end - (count * sec * 2) 
+                
+                # Fetch Chunk
+                response = api.get_candles(
+                    market_id=market_id,
+                    resolution=res_str,
+                    timestamp_start=chunk_start,
+                    timestamp_end=current_end,
+                    count_back=count
+                )
+                
+                # Extract Items
+                items = []
+                if isinstance(response, dict):
+                    if 'c' in response: items = response['c']
+                    elif 'candlesticks' in response: items = response['candlesticks']
+                    elif 'candles' in response: items = response['candles']
+                elif isinstance(response, list):
+                     items = response
+                     
+                if not items:
+                    break
+                    
+                # Parse Chunk
+                chunk_formatted = []
+                for c in items:
+                    if isinstance(c, dict) and 't' in c:
+                         chunk_formatted.append({
+                            "timestamp": c['t'] / 1000.0,
+                            "open": float(c.get("o", 0)),
+                            "high": float(c.get("h", 0)),
+                            "low": float(c.get("l", 0)),
+                            "close": float(c.get("c", 0)),
+                            "volume": float(c.get("v", 0))
+                         })
+                    elif isinstance(c, dict) and 'timestamp' in c:
+                        chunk_formatted.append({
+                            "timestamp": c['timestamp'],
+                            "open": float(c.get("open", 0)),
+                            "high": float(c.get("high", 0)),
+                            "low": float(c.get("low", 0)),
+                            "close": float(c.get("close", 0)),
+                             "volume": float(c.get("volume", 0))
+                        })
+                
+                # Sort just within chunk
+                chunk_formatted.sort(key=lambda x: x['timestamp'])
+                
+                # Filter out dupes or future data if any
+                new_candles = [c for c in chunk_formatted if c['timestamp'] < current_end]
+                
+                if not new_candles:
+                    new_candles = chunk_formatted # Fallback
+                
+                if not new_candles:
+                    break
+
+                # Add to collection (prepend because we are going backwards? No, results come oldest->newest usually)
+                # But here we are fetching back from 'current_end'.
+                # The API likely returns [Oldest ... Newest] in that window.
+                # So we should prepend or append?
+                # If we use count_back from end, we get [End-Count ... End].
+                # So the next query needs End' = (Oldest Timestamp of this chunk).
+                
+                collected_candles.extend(new_candles)
+                
+                # Update cursor for next page (move backwards)
+                # We want the end of the next chunk to be the start of the oldest candle we just got.
+                oldest_in_chunk = new_candles[0]['timestamp']
+                current_end = int(oldest_in_chunk)
+                
+                # If we got fewer than requested, we actally might be done or API limits
+                if len(new_candles) < 5: # Some buffer for sparse data
+                     break
+                     
+                # Dedupe later
             
-            formatted.sort(key=lambda x: x['timestamp'])
-            return formatted
+            # Deduplicate by timestamp
+            unique = {c['timestamp']: c for c in collected_candles}
+            final_list = list(unique.values())
+            final_list.sort(key=lambda x: x['timestamp'])
+            
+            # Return exact limit needed (taking the most recent ones)
+            return final_list[-limit:]
             
         except Exception as e:
             logger.error(f"Download exception for {market_id} {resolution}: {e}")

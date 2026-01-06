@@ -278,6 +278,18 @@ class PaperTradingAccount:
         if state_changed:
             await self.save_state()
 
+    async def update_position_metadata(self, coin: str, reason: str, invalidation: Optional[str] = None) -> None:
+        """
+        Update the reasoning/invalidation for an existing open position.
+        """
+        if coin in self.positions:
+            self.positions[coin]["reason"] = reason
+            if invalidation:
+                self.positions[coin]["invalidation"] = invalidation
+            self.positions[coin]["last_decision_timestamp"] = datetime.utcnow().isoformat()
+            await self.save_state()
+            logger.info(f"Updated metadata for {coin} position.")
+
     async def execute_trade(self, decision: Dict[str, Any], current_price: float) -> None:
         """
         Execute a trade entry based on a decision.
@@ -333,8 +345,16 @@ class PaperTradingAccount:
             # 4. Cash Constraint (Hard Limit)
             qty_cash = (self.cash * leverage) / entry_price
 
-            # 5. Final Quantity
-            quantity = min(qty_risk, qty_margin, qty_cash)
+            # 5. AI Recommended Sizing (Optional Override)
+            qty_ai = float('inf')
+            if "position_size_usd" in decision:
+                ai_size_usd = decision["position_size_usd"]
+                if ai_size_usd > 0:
+                     qty_ai = ai_size_usd / entry_price
+                     logger.info(f"Risk Agent requested size: ${ai_size_usd:.2f} ({qty_ai:.4f} units)")
+
+            # 6. Final Quantity (Min of Risk Cap, Margin Cap, Cash, and AI Target)
+            quantity = min(qty_risk, qty_margin, qty_cash, qty_ai)
             
             if quantity <= 0:
                 logger.warning(f"Calculated quantity is {quantity}, skipping.")
