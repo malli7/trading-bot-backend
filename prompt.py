@@ -523,7 +523,7 @@ Risk score directly influences:
 ━━━━━━━━━━━━━━━━━━
 OUTPUT FORMAT (JSON ONLY — STRICT)
 ━━━━━━━━━━━━━━━━━━
-{
+{{
   "signal": "CONFIRMED" | "REJECTED" | "OVERRIDE_HOLD",
   "risk_score": 0.0–10.0,
   "risk_percent": 1.5–3.0,
@@ -532,6 +532,6 @@ OUTPUT FORMAT (JSON ONLY — STRICT)
   "stop_loss": float,
   "take_profit_reference": float,
   "reasoning": "Structure: [what breaks the thesis]. Liquidity: [why stop is safe]. Volatility: [why size/leverage are appropriate]."
-}
+}}
 """
 
