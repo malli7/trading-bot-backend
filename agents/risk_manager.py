@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 # Project Imports
 from prompt import RISK_MANAGER_PROMPT
 from core.risk_engine import risk_engine
+from llm_config import RISK_MODEL_ID
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -42,7 +43,7 @@ class RiskAssessmentAgent:
              base_url="https://openrouter.ai/api/v1",
              api_key=api_key
         )
-        self.model = "google/gemini-2.0-flash-001" # Fast, smart model for Risk
+        self.model = RISK_MODEL_ID # Fast, smart model for Risk
 
     async def assess_risk(
         self, 

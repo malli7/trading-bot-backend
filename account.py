@@ -246,17 +246,20 @@ class PaperTradingAccount:
         for symbol, pos in list(self.positions.items()):
             if symbol in current_prices:
                 curr = current_prices[symbol]
+                # Update stored current price for external agents
+                pos['current_price'] = curr
+                
                 entry = pos['entry_price']
                 qty = pos['quantity']
                 
                 if pos['sign'] == "LONG":
-                    unrealized = (curr - entry) * qty
+                    pnl_unrealized = (curr - entry) * qty
                 else:
-                    unrealized = (entry - curr) * qty
+                    pnl_unrealized = (entry - curr) * qty
                 
                 # Update floating PnL
-                if pos.get('unrealized_pnl') != unrealized:
-                    pos['unrealized_pnl'] = unrealized
+                if pos.get('unrealized_pnl') != pnl_unrealized:
+                    pos['unrealized_pnl'] = pnl_unrealized
                     state_changed = True
                 
                 # Check Stop Loss
