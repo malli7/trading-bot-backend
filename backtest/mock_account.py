@@ -1,9 +1,17 @@
 """
-Mock Trading Account for Backtesting.
+Mock Account Service (The Simulator State)
+==========================================
 
-This class mimics the interface of `PaperTradingAccount` but runs entirely in memory
-without database connections. It tracks virtual cash, positions, and logs trades
-to a local JSON file for analysis.
+Why This Module Exists
+----------------------
+To enable risk-free simulation by mimicking the production `PaperTradingAccount` interface.
+It allows the agent to interact with a "ghost" ledger that tracks PnL, positions, and history 
+in-memory, without touching the real MongoDB or modifying live state.
+
+Key Features:
+1.  **In-Memory State**: Fast execution, reset on every run.
+2.  **Interface Parity**: precise method signatures match production services.
+3.  **Local Logging**: Dumps trade history to JSON for the "Brutal Review".
 """
 import logging
 import json

@@ -1,20 +1,28 @@
 """
-Reflection Agent Module.
+Reflection Agent Module (The Critic)
+====================================
 
-This agent is responsible for "Continuous Improvement". It reviews past trading
-decisions (specifically skipped or held trades) against subsequent price action
-to identify "missed opportunities" and generate lessons for the Swarm.
+Why This Module Exists
+----------------------
+This is the **Continuous Improvement Layer**.
+It reviews past trading decisions (Closed Trades, Open Positions, Skipped Signals) to identify errors and generate lessons.
+
+Responsibilities:
+1.  **Post-Mortem**: Analyzing closed trades to see if they followed the process.
+2.  **Active Audit**: Checking open positions for stagnation ("Dead Money").
+3.  **Missed Opportunity**: Analyzing skipped trades that went on to pump.
 """
 import logging
-import os
 import asyncio
 import time
 from typing import Dict, Optional, Set, List, Any
 from datetime import datetime, timedelta
 
 from openai import AsyncOpenAI
-from account import demo_account
-from llm_config import REFLECTION_MODEL_ID
+from services.account import demo_account
+from core.config import settings
+
+REFLECTION_MODEL_ID = settings.REFLECTION_MODEL_ID
 from prompt import REFLECTION_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -30,7 +38,7 @@ class ReflectionAgent:
     
     def __init__(self):
         self.model = REFLECTION_MODEL_ID
-        self.api_key = os.getenv("OPENROUTER_API_KEY")
+        self.api_key = settings.OPENROUTER_API_KEY
         self.client = AsyncOpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=self.api_key,
@@ -54,7 +62,7 @@ class ReflectionAgent:
         tasks = []
         
         # A. Analyze Closed Trades (Post-Mortem)
-        tasks.append(self._analyze_closed_trades(history))
+        tasks.append(self._analyze_closed_trades(history, current_prices))
         
         # B. Analyze Open Positions (Active Audit)
         # We use demo_account.positions directly
@@ -74,9 +82,9 @@ class ReflectionAgent:
     # ==========================================
     # A. CLOSED TRADE ANALYSIS (Post-Mortem)
     # ==========================================
-    async def _analyze_closed_trades(self, history: List[Dict]):
-        """Find recent closes and critique them."""
-        # Filter for CLOSES in last 24h
+    async def _analyze_closed_trades(self, history: List[Dict], current_prices: Dict[str, float]):
+        """Find recent closes and critique the top 3 most significant ones."""
+        # 1. Filter for CLOSES in last 24h
         now = datetime.utcnow()
         recent_closes = []
         
@@ -88,7 +96,61 @@ class ReflectionAgent:
                         recent_closes.append(action)
                 except: continue
 
+        # 2. Assign Significance Score
+        # Score = abs(Realized PnL %) + abs(Missed PnL %)
+        scored_events = []
+        
         for close_action in recent_closes:
+            coin = close_action["coin"]
+            
+            # Find matching OPEN
+            open_action = self._find_matching_open(history, coin, close_action["time"])
+            entry_price = float(open_action.get("price", 0)) if open_action else 0.0
+            exit_price = float(close_action.get("price", 0))
+            
+            if entry_price == 0: continue
+
+            # A. Realized PnL %
+            realized_pnl_val = close_action.get("pnl", 0)
+            realized_pct = ((exit_price - entry_price) / entry_price) * 100
+            if realized_pnl_val < 0 and realized_pct > 0: realized_pct *= -1 # Short adjustment
+            
+            # B. Missed Opportunity PnL %
+            curr_price = current_prices.get(coin, exit_price)
+            missed_pct = 0.0
+            
+            # Use 'action' from OPEN event to determine direction
+            direction = "LONG" # Default assumption
+            if open_action:
+                 act = open_action.get("action", "").lower()
+                 if "sell" in act or "short" in act: 
+                     direction = "SHORT"
+                 else:
+                     direction = "LONG"
+            
+            if direction == "LONG":
+                 missed_pct = ((curr_price - exit_price) / exit_price) * 100
+            else:
+                 missed_pct = ((exit_price - curr_price) / exit_price) * 100
+            
+            # Significance Score
+            score = abs(realized_pct) + abs(missed_pct)
+            
+            scored_events.append({
+                "action": close_action,
+                "score": score,
+                "realized_pct": realized_pct,
+                "missed_pct": missed_pct,
+                "entry_price": entry_price,
+                "entry_reason": open_action.get("reason", "Unknown") if open_action else "Unknown"
+            })
+            
+        # 3. Sort & Slice (Limit to Top 3 to save costs)
+        scored_events.sort(key=lambda x: x["score"], reverse=True)
+        top_events = scored_events[:3]
+
+        for event in top_events:
+            close_action = event["action"]
             coin = close_action["coin"]
             close_id = f"CLOSE_{close_action['time']}_{coin}"
             
@@ -96,31 +158,19 @@ class ReflectionAgent:
             if await self._is_processed(close_id):
                 continue
                 
-            # Find matching OPEN
-            open_action = self._find_matching_open(history, coin, close_action["time"])
-            entry_reason = open_action.get("reason", "Unknown") if open_action else "Unknown"
-            entry_price = open_action.get("price", 0) if open_action else 0
-            
-            # Data Prep
-            pnl_val = close_action.get("pnl", 0)
-            # Approximate PnL% if size is missing
-            exit_price = close_action.get("price", 0)
-            pnl_pct = 0.0
-            if entry_price > 0:
-                 pnl_pct = ((exit_price - entry_price) / entry_price) * 100
-                 if pnl_val < 0 and pnl_pct > 0: pnl_pct *= -1 # Adjust for shorts if needed (simplification)
-
-            outcome_desc = f"Closed with PnL: {pnl_pct:.2f}%. Exit Reason: {close_action.get('reason')}"
+            outcome_desc = (f"Closed PnL: {event['realized_pct']:.2f}%. "
+                            f"Price moved another {event['missed_pct']:.2f}% after exit. "
+                            f"Total Opportunity: {event['score']:.2f}%.")
             
             # Generate Lesson
             await self._process_and_save_lesson(
                 close_id,
                 action="TRADE_COMPLETE", 
                 coin=coin, 
-                old_price=entry_price, 
-                curr_price=exit_price, 
-                pnl_pct=pnl_pct, 
-                reason=f"Entry: {entry_reason}", 
+                old_price=event["entry_price"], 
+                curr_price=close_action.get("price", 0), 
+                pnl_pct=event["realized_pct"], 
+                reason=f"Entry: {event['entry_reason']} | Exit: {close_action.get('reason')}", 
                 outcome_desc=outcome_desc
             )
 
@@ -189,7 +239,9 @@ class ReflectionAgent:
     # C. SKIPPED TRADE ANALYSIS (Missed Opps)
     # ==========================================
     async def _analyze_skipped_trades(self, decisions: List[Dict], current_prices: Dict):
-        """Check if we missed a pump."""
+        """Check if we missed a pump (Top 3 Biggest Misses)."""
+        candidates = []
+
         for dec in decisions:
             coin = dec.get("coin")
             if not coin or coin not in current_prices:
@@ -197,6 +249,9 @@ class ReflectionAgent:
                 
             # ID
             decision_id = f"SKIP_{dec['timestamp']}_{coin}"
+            
+            # Defer deduplication check until after sorting to ensure we pick the best ones?
+            # Actually no, if we already processed it, we shouldn't count it.
             if await self._is_processed(decision_id):
                 continue
                 
@@ -204,23 +259,40 @@ class ReflectionAgent:
             old_price = float(dec.get("price", 0))
             if old_price == 0: continue
             
-            # Simple threshold: If price moved > 2% against our 'wait', it's a miss
+            # Movement since decision
             move_pct = ((curr_price - old_price) / old_price) * 100
             
-            # Only send to LLM if there is actually something to discuss
+            # Filter: Only care if it moved > 2%
             if abs(move_pct) > 2.0:
-                outcome_desc = f"Market moved {move_pct:.2f}% after we voted {dec.get('signal')}."
-                
-                await self._process_and_save_lesson(
-                    decision_id,
-                    action="MISSED_OPP_CHECK",
-                    coin=coin,
-                    old_price=old_price,
-                    curr_price=curr_price,
-                    pnl_pct=move_pct, # Hypothetical PnL
-                    reason=dec.get("reason", "Unknown"),
-                    outcome_desc=outcome_desc
-                )
+                 candidates.append({
+                     "decision": dec,
+                     "id": decision_id,
+                     "move_pct": move_pct,
+                     "score": abs(move_pct),
+                     "curr_price": curr_price,
+                     "old_price": old_price
+                 })
+
+        # Sort by magnitude of miss (biggest regrets first)
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+        top_misses = candidates[:3]
+
+        for cand in top_misses:
+            move_pct = cand["move_pct"]
+            dec = cand["decision"]
+            
+            outcome_desc = f"Market moved {move_pct:.2f}% after we voted {dec.get('signal')}."
+                 
+            await self._process_and_save_lesson(
+                cand["id"],
+                action="MISSED_OPP_CHECK",
+                coin=dec.get("coin"),
+                old_price=cand["old_price"],
+                curr_price=cand["curr_price"],
+                pnl_pct=move_pct, # Hypothetical PnL
+                reason=dec.get("reason", "Unknown"),
+                outcome_desc=outcome_desc
+            )
 
     # ==========================================
     # HELPERS

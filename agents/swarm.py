@@ -1,9 +1,17 @@
 """
-Swarm Analyst Module.
+Swarm Analyst Module (The Mind)
+===============================
 
-This module implements a "Swarm Intelligence" approach where multiple diverse
-LLM personas analyze market data in parallel. A Master LLM then aggregates
-their individual reports into a final consensus decision.
+Why This Module Exists
+----------------------
+This is the **Perception Layer** (The Mind).
+It uses a "Swarm Intelligence" approach where multiple diverse LLM personas analyze market data in parallel.
+A Master LLM then aggregates their individual reports into a final consensus decision.
+
+Responsibilities:
+1.  **Distributed Analysis**: Parallel processing of market data by different personas.
+2.  **Consensus Building**: Aggregating diverse views to reduce hallucination and bias.
+3.  **Signal Generation**: Outputting a raw "Vote" (Buy/Sell/Hold) for the Risk Manager to evaluate.
 """
 import logging
 import json
@@ -13,11 +21,15 @@ import time
 from typing import Dict, Any, List, Optional
 
 from openai import AsyncOpenAI
-from account import demo_account
+from core.config import settings
+from services.account import demo_account
 
 logger = logging.getLogger(__name__)
 
-from llm_config import SWARM_MODELS, MASTER_MODEL_ID
+# --- Agents Config ---
+# Model IDs are now loaded from settings
+SWARM_MODELS = settings.SWARM_MODELS
+MASTER_MODEL_ID = settings.MASTER_MODEL_ID
 from agents.reflection import ReflectionAgent
 from prompt import SWARM_PROMPT, MASTER_AGGREGATION_PROMPT
 
@@ -32,7 +44,7 @@ class SwarmAnalyst:
     """
     
     def __init__(self):
-        self.api_key = os.getenv("OPENROUTER_API_KEY")
+        self.api_key = settings.OPENROUTER_API_KEY
         self.client = AsyncOpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=self.api_key,
@@ -42,13 +54,12 @@ class SwarmAnalyst:
         # Diverse models for different perspectives (Using reliable IDs)
         self.models = SWARM_MODELS
 
-    async def get_consensus(self, market_data: Dict[str, Any], sentiment: Dict[str, Any], current_position: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def get_consensus(self, market_data: Dict[str, Any], current_position: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Query all models in parallel and aggregate votes via Master LLM.
         
         Args:
             market_data: Technical indicators for the asset.
-            sentiment: Macro market sentiment.
             current_position: Existing position info (or None).
             
         Returns:
@@ -73,10 +84,9 @@ class SwarmAnalyst:
         # 2. Prepare Tasks
         tasks = []
         market_str = json.dumps(market_data, default=str)
-        sentiment_str = json.dumps(sentiment, default=str)
         
         for model_cfg in self.models:
-            tasks.append(self._query_model(model_cfg, market_str, sentiment_str, lessons_str, pos_str))
+            tasks.append(self._query_model(model_cfg, market_str, lessons_str, pos_str))
             
         # 3. Gather Results
         results = await asyncio.gather(*tasks)
@@ -91,9 +101,9 @@ class SwarmAnalyst:
              }
 
         # 4. Master Aggregation
-        return await self._aggregate_with_master(valid_results, sentiment_str, pos_str)
+        return await self._aggregate_with_master(valid_results, pos_str)
 
-    async def _aggregate_with_master(self, results: List[Dict], sentiment_str: str, pos_str: str) -> Dict[str, Any]:
+    async def _aggregate_with_master(self, results: List[Dict], pos_str: str) -> Dict[str, Any]:
         """
         Send all individual agent reports to a Master LLM for synthesis.
         """
@@ -104,7 +114,6 @@ class SwarmAnalyst:
             reports += f"Reason: {res['reason']}\nInvalidation: {res['invalidation']}\n"
             
         prompt = MASTER_AGGREGATION_PROMPT.format(
-            sentiment=sentiment_str, 
             reports=reports,
             position=pos_str,
             time_since_last_trade="N/A"
@@ -126,6 +135,7 @@ class SwarmAnalyst:
             conf = 0.0
             reason = ""
             invalidation = ""
+            leverage = 1
             current_section = None
             
             lines = content.split('\n')
@@ -168,7 +178,14 @@ class SwarmAnalyst:
                             invalidation += content_part
                 elif key_line.startswith("Risk Note:"):
                     current_section = "risk"
-                
+                elif key_line.startswith("Recommended Leverage:") or key_line.startswith("Leverage:"):
+                    current_section = None
+                    try:
+                        # Parse "3x", "5" etc.
+                        val_str = key_line.split(":", 1)[1].strip().lower().replace("x", "")
+                        leverage = int(float(val_str))
+                    except: pass
+
                 # Append to current section for continuation lines
                 elif current_section == "rationale":
                     reason += " " + clean_line
@@ -187,7 +204,8 @@ class SwarmAnalyst:
                 "signal": decision,
                 "confidence": conf,
                 "rationale": reason,
-                "invalidation": invalidation
+                "invalidation": invalidation,
+                "suggested_leverage": leverage
             }
             
         except Exception as e:
@@ -220,12 +238,11 @@ class SwarmAnalyst:
             "invalidation": "Aggregation Failed"
         }
 
-    async def _query_model(self, model_cfg: Dict[str, str], market_data: str, sentiment: str, lessons: str, pos_str: str) -> Optional[Dict[str, Any]]:
+    async def _query_model(self, model_cfg: Dict[str, str], market_data: str, lessons: str, pos_str: str) -> Optional[Dict[str, Any]]:
         """Query a single Swarm Agent."""
         prompt = SWARM_PROMPT.format(
             role_name=model_cfg["role"],
             market_data=market_data,
-            sentiment=sentiment,
             lessons=lessons,
             position=pos_str
         )

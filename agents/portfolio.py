@@ -1,13 +1,21 @@
 """
-Portfolio Manager Module.
+Portfolio Manager Module (The Risk Gatekeeper)
+==============================================
 
-This agent acts as the Risk Manager. It takes the consensus signal from the Swarm
-and decides on the final allocation (Position Sizing, Leverage, Stop Loss).
-It enforces risk limits and does NOT use an LLM, relying on deterministic math.
+Why This Module Exists
+----------------------
+This is the **Allocation Layer**.
+It takes the raw signal from the Swarm (Mind) and decides *if* and *how much* to trade based on conviction.
+
+Responsibilities:
+1.  **Sizing Rules**: Determining position size based on confidence score.
+2.  **Filtering**: Rejecting low-conviction signals (filtering noise).
+3.  **Leverage Assignment**: Assigning leverage tiers based on asset class (defined in config).
 """
 import logging
 from typing import Dict, Any, Optional
-from account import demo_account
+from services.account import demo_account
+from core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +28,8 @@ class PortfolioManager:
         min_confidence_buy (float): Minimum confidence required to enter a trade.
     """
     def __init__(self):
-        self.max_position_size = 0.30 # 30% max per trade
-        self.min_confidence_buy = 60.0 
+        self.max_position_size = settings.PORTFOLIO_MAX_POS_SIZE
+        self.min_confidence_buy = settings.PORTFOLIO_MIN_CONFIDENCE 
         
     def allocate(
         self, 
@@ -31,7 +39,8 @@ class PortfolioManager:
         price: float, 
         current_position: Optional[Dict[str, Any]] = None, 
         swarm_reason: Optional[str] = None, 
-        swarm_invalidation: Optional[str] = None
+        swarm_invalidation: Optional[str] = None,
+        suggested_leverage: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Determine if we should execute a trade and calculate sizing parameters.
@@ -48,11 +57,10 @@ class PortfolioManager:
         Returns:
             Dict containing the final executable decision.
         """
+        # Default Clean Decision (SKIP_TRADE)
         decision = {
-            "signal": "skip_trade",
+            "signal": "SKIP_TRADE",
             "coin": coin,
-            "leverage": 1,
-            "size": 0.0,
             "reason": "Initial",
             "invalidation": "None"
         }
@@ -89,15 +97,24 @@ class PortfolioManager:
             return decision
 
         # 2. New Entry Logic (Only if no position)
-        if signal == "HOLD":
-            decision["reason"] = swarm_reason if swarm_reason else "Swarm voted HOLD"
-            decision["invalidation"] = swarm_invalidation
+        if signal in ["HOLD", "WAIT"]:
+            decision["signal"] = "SKIP_TRADE"
+            decision["reason"] = swarm_reason if swarm_reason else f"Swarm voted {signal}"
+            # Pass through the Swarm's invalidation (Regime Shift logic)
+            decision["invalidation"] = swarm_invalidation if swarm_invalidation else "Regime Lock"
             return decision
             
         if signal == "BUY" and confidence < self.min_confidence_buy:
              decision["reason"] = f"Confidence {confidence}% < Threshold {self.min_confidence_buy}% ({swarm_reason})"
              return decision
              
+        # Add SELL Confidence Check (Chop Filter)
+        if signal == "SELL" and confidence < 70.0:
+            decision["signal"] = "SKIP_TRADE"
+            decision["reason"] = f"Low conviction sell ({confidence}% < 70%) - Likely Chop"
+            decision["invalidation"] = swarm_invalidation
+            return decision
+
         # 3. Direction Mapping
         # Assuming Long-Only bias for "BUY" unless specific short logic added later.
         # Architecture supports Shorts if signal is SELL, but strictly speaking we often treat SELL as exit.
@@ -112,11 +129,15 @@ class PortfolioManager:
         
         allocation_pct = 0.10 # Default
         if confidence >= 80:
-            allocation_pct = 0.25
+            allocation_pct = 0.25 # High conviction
         elif confidence >= 70:
-             allocation_pct = 0.15
+             allocation_pct = 0.15 # Medium conviction
              
-        leverage = 3 if coin in ["BTC", "ETH"] else 2
+        # Leverage Logic (Agentic)
+        if suggested_leverage:
+            leverage = suggested_leverage
+        else:
+            leverage = 1 # Safe default if agent is silent
         
         # 5. Stop Loss / Profit Target (Heuristic)
         # In a real system, these should come from Technical Analysis (ATR, Swing Lows)
@@ -132,6 +153,7 @@ class PortfolioManager:
         # Use Swarm Reason if valid, otherwise generic
         final_reason = swarm_reason if swarm_reason and "No reason" not in swarm_reason else f"Swarm {signal} w/ {confidence}% conf"
         
+        # Only populate trade params if we are ACTUALLY entering
         decision.update({
              "signal": mapped_signal,
              "leverage": leverage,

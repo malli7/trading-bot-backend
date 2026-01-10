@@ -1,8 +1,16 @@
 """
-Technical Indicators Module.
+Technical Analysis Indicators Module (The Quant Lib)
+====================================================
 
-This module contains pure mathematical functions to calculate common
-technical analysis indicators (EMA, RSI, MACD, ATR).
+Why This Module Exists
+----------------------
+This module contains the pure mathematical logic for the system (Quant Lib).
+It processes raw market data into actionable signals.
+
+Responsibilities:
+1. **Precision**: Standard EMA, RSI, MACD, ATR formulas.
+2. **Alignment**: Ensures indicator array outputs matched to the input timeline.
+3. **Performance**: Optimized list operations for high-frequency loops.
 """
 from typing import List, Dict, Union, Optional
 

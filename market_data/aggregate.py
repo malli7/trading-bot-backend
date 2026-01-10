@@ -1,14 +1,22 @@
 """
-Data Aggregation Module.
+Market Data Aggregation Module (The Pipeline)
+=============================================
 
-This module coordinates fetching raw market data (candles) and transforming it
-into technical indicators for use by the trading agents.
+Why This Module Exists
+----------------------
+This module acts as the central data pipeline.
+It bridges the gap between raw external acquisition (`candles.py`) and signal generation (`indicators.py`).
+
+Responsibilities:
+1. **Orchestration**: Fetches multiple timeframes (15m, 1h, 4h) in parallel.
+2. **Buffering**: Manages fetch limits to ensure warm-up data for indicators.
+3. **Synthesis**: RETURNS the full, unified market snapshot used by the Orchestrator.
 """
 import asyncio
 from typing import Dict, Any, List
 
-from candles import get_candles
-from indicators import calculate_all_indicators
+from .candles import get_candles
+from .indicators import calculate_all_indicators
 
 async def get_indicators(duration: str, market_id: int, limit: int = 20) -> Dict[str, List[float]]:
     """

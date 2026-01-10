@@ -1,9 +1,17 @@
 """
-Trading Account Management Module.
+Trading Account execution Module (The Body)
+===========================================
 
-This module handles the state of the paper trading account, including
-balance, positions, and history tracking. It also manages persistence
-using MongoDB for storing decision logs, lessons, and account state.
+Why This Module Exists
+----------------------
+This is the **Execution Layer** of the agent. 
+While the Agents (Mind) make decisions, this module (Body) holds the keys to the wallet.
+
+Responsibilities:
+1.  **State Management**: Tracks Cash, Positions, and History.
+2.  **Gatekeeping**: Enforces hard limits (Max Margin, Max Risk) from `config.py` 
+    *before* any trade is executed, regardless of what the AI suggests.
+3.  **Persistence**: Saves state to MongoDB so the bot doesn't "forget" its money on restart.
 """
 import os
 import logging
@@ -17,11 +25,13 @@ from dotenv import load_dotenv
 # Load env variables (ensures we have MONGO_URI)
 load_dotenv()
 
+from core.config import settings
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-INITIAL_BALANCE = 1000.0
+INITIAL_BALANCE = settings.ACCOUNT_INITIAL_BALANCE
 
 class PaperTradingAccount:
     """
@@ -171,6 +181,46 @@ class PaperTradingAccount:
             await self.collection.replace_one({"_id": "account_main"}, data, upsert=True)
         except Exception as e:
             logger.error(f"Failed to save state to DB: {e}")
+
+    async def reset_account(self) -> None:
+        """
+        Reset changes in memory and drop the collection in MongoDB.
+        """
+        self.cash = self.initial_balance
+        self.positions = {}
+        self.history = []
+
+        if self.collection is not None:
+            try:
+                await self.collection.drop()
+                logger.info("Account collection dropped.")
+            except Exception as e:
+                logger.error(f"Failed to drop account collection: {e}")
+
+        if self.decision_collection is not None:
+            try:
+                await self.decision_collection.drop()
+                logger.info("Decision logs collection dropped.")
+            except Exception as e:
+                logger.error(f"Failed to drop decision logs: {e}")
+
+        if self.lessons_collection is not None:
+            try:
+                await self.lessons_collection.drop()
+                logger.info("Lessons learned collection dropped.")
+            except Exception as e:
+                logger.error(f"Failed to drop lessons collection: {e}")
+
+        if self.sentiment_collection is not None:
+            try:
+                await self.sentiment_collection.drop()
+                logger.info("Sentiment logs collection dropped.")
+            except Exception as e:
+                logger.error(f"Failed to drop sentiment logs: {e}")
+        
+        # Save the fresh state immediately so the DB has the initial record
+        await self.save_state()
+        logger.info("Account reset complete.")
 
     @property
     def total_value(self) -> float:
@@ -331,14 +381,14 @@ class PaperTradingAccount:
                 logger.warning("Stop loss equals entry price, invalid.")
                 return
 
-            # Max Risk Allowed = 2% of Total Account Value
+            # Max Risk Allowed = settings.MAX_RISK_PER_TRADE of Total Account Value
             account_value = self.total_value
-            max_risk_allowed = account_value * 0.02
+            max_risk_allowed = account_value * settings.MAX_RISK_PER_TRADE
             
             qty_risk = max_risk_allowed / risk_per_share
             
-            # 3. Margin-Based Sizing: Max Margin Allowed = 20% of Total Account Value
-            max_margin_allowed = account_value * 0.20
+            # 3. Margin-Based Sizing: Max Margin Allowed = settings.MAX_MARGIN_PER_POS of Total Account Value
+            max_margin_allowed = account_value * settings.MAX_MARGIN_PER_POS
             
             # Position Value = Margin * Leverage
             max_position_value = max_margin_allowed * leverage

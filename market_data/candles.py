@@ -1,8 +1,22 @@
 """
-Candle Data Fetcher Module.
+Cryptocurrency Candlestick Data Extraction Module (The Sensor)
+==============================================================
 
-This module interacts with the lighter.xyz API to fetch historical candlestick data.
-It includes a custom API wrapper to handle specific endpoint quirks and headers.
+Why This Module Exists
+----------------------
+This is the dedicated data acquisition layer (Sensor).
+It interfaces directly with the Lighter.xyz Decentralized Exchange (DEX) API to retrieve, parse, 
+and normalize historical OHLCV market data.
+
+Key Responsibilities
+--------------------
+1. **API Interfacing**: 
+   - Implements a custom wrapper around the SDK to resolve versioning/path issues.
+   - Manages HTTP headers to mimic browser traffic (WAF circumvention).
+2. **Data Normalization**: 
+   - Standardizes disparate API response formats into a unified list of dictionaries.
+3. **Timeframe Management**:
+   - Handles the conversion of human-readable duration strings (e.g., '5m') into resolution keys.
 """
 import time
 import logging
@@ -18,9 +32,6 @@ lighter.modules.api.VERSION = "/v1"
 class CustomApi(Api):
     """
     Subclass of Lighter SDK Api to fix get_candles functionality.
-    
-    Overrides the default method to use the working '/candles' endpoint
-    instead of the SDK's default '/candlesticks'.
     """
     def get_candles(self, market_id: int, resolution: str, timestamp_start: int, timestamp_end: int, count_back: int) -> dict:
         params = {
@@ -35,6 +46,7 @@ class CustomApi(Api):
         return self._get(request_path="/candles", params=params)
 
 # Initialize the CustomAPI
+# Ideally this URL should be in settings, but keeping as const here for specific DEX dependency
 API_URL = "https://mainnet.zklighter.elliot.ai"
 
 # Initialize with custom settings

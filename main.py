@@ -1,37 +1,56 @@
 """
-Trading Bot API Main Entry Point.
+Trading Bot API Main Entry Point (The Entryway)
+===============================================
 
-This module initializes the FastAPI application, configures CORS,
-and defines the API endpoints using the Refactored Services.
+Why This Module Exists
+----------------------
+This is the **Gateway Layer** of the application.
+It exposes the agentic capabilities (Conductor) and data services to the outside world
+(frontend, cron jobs, etc.) via a standard HTTP interface.
+
+Responsibilities:
+1.  **Routing**: Mapping HTTP requests to Service Logic.
+2.  **Lifecycle**: Managing Startup (DB connection) and Shutdown.
+3.  **Middleware**: Handling CORS, Security, and Global Error catching.
 """
 from contextlib import asynccontextmanager
 from typing import Dict, Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
 
 # Core Imports
 from core.config import settings
-from core.schemas import CycleResult, IndicatorResponse, AnalysisResponse
+from core.schemas import CycleResult
 
 # Service Imports
-from data import get_indicators, get_full_analysis
-from account import demo_account
+from market_data.aggregate import get_indicators, get_full_analysis
+from services.account import demo_account
 from services.orchestrator import run_agent_cycle
 
+# ==========================================
+# LIFECYCLE MANAGEMENT
+# ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Lifespan context manager for startup and shutdown events.
-    Initializes the trading account (MongoDB connection).
+    Application Lifecycle Manager.
+    1. Connects to MongoDB (via account service).
+    2. Wires up any necessary singletons.
     """
+    # Startup
     await demo_account.initialize()
     yield
-    # Cleanup logic if needed
+    # Shutdown (if needed)
+    pass
 
+# ==========================================
+# APP SETUP
+# ==========================================
 app = FastAPI(
     title=settings.APP_NAME,
-    description="API for Agentic Trading Bot with Swarm Intelligence (v2)",
+    description="API for Agentic Trading Bot with Swarm Intelligence",
     version="2.1.0",
     lifespan=lifespan,
     debug=settings.DEBUG
@@ -44,6 +63,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ==========================================
+# ENDPOINTS
+# ==========================================
 
 @app.get("/indicators", response_model=Dict[str, Any])
 async def indicators(market_id: int, timeframe: str, limit: int = 20) -> Dict[str, Any]:
@@ -58,16 +81,9 @@ async def analysis(market_id: int) -> Dict[str, Any]:
 @app.post("/trade_decision", response_model=Dict[str, Any])
 async def trade_decision() -> Dict[str, Any]:
     """
-    Trigger the AI Agent Cycle.
-    
-    1. Reflection (Review past)
-    2. Data Collection
-    3. Swarm Analysis (Consensus)
-    4. Portfolio Allocation
-    5. Execution
+    Trigger the AI Agent Cycle (The Conductor).
+    Executes: Learn -> See -> Think -> Decide -> Act.
     """
-    # run_agent_cycle now returns a Dict compatible with CycleResult schema
-    # But for now we keep Dict[str, Any] as response model to be safe until we verify schema match perfectly
     result = await run_agent_cycle()
     return result
 
@@ -81,11 +97,20 @@ def get_account_info() -> Dict[str, Any]:
         "total_value": demo_account.total_value
     }
 
+@app.post("/account/reset", response_model=Dict[str, str])
+async def reset_account() -> Dict[str, str]:
+    """Reset the account state and clear the database (Dev Mode)."""
+    await demo_account.reset_account()
+    return {"status": "success", "message": "Account reset successfully"}
+
 @app.get("/")
 def read_root() -> Dict[str, str]:
     """Health check endpoint."""
-    return {"message": f"{settings.APP_NAME} Operational"}
+    return {
+        "status": "operational",
+        "service": settings.APP_NAME,
+        "mode": "debug" if settings.DEBUG else "production"
+    }
 
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8001)

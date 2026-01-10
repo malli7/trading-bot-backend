@@ -1,9 +1,20 @@
-
 """
-Data Transfer Objects (DTOs) and Domain Models.
+Core Data Schemas (DTOs)
+========================
 
-This module defines Pydantic models to ensure type safety and data validation
-across the application, replacing loose dictionaries.
+Why This Module Exists
+----------------------
+In a multi-agent system, Agents (LLMs) and Code (Execution) must speak the exact same language.
+If an Agent outputs "buy" but the system expects "BUY", the trade fails.
+
+This module acts as the **Type System** / **Contract** that enforces:
+1. **Strict Inputs**: Agents only receive data that fits the `AccountState` schema.
+2. **Strict Outputs**: Agents must produce decisions that fit the `TradeDecision` schema.
+
+Validation
+----------
+Any data failing these schemas (e.g., missing "confidence" score) will trigger a validation error
+BEFORE it reaches the exchange, acting as a critical safety layer against LLM hallucinations.
 """
 from typing import List, Optional, Dict, Any, Union
 from pydantic import BaseModel, Field, field_validator

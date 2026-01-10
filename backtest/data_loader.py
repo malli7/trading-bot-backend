@@ -1,8 +1,16 @@
 """
-Data Loader for Backtesting.
+Data Loader (The Time Machine)
+==============================
 
-Fetches historical data from Lighter.xyz API using the shared `candles.py` API wrapper,
-caches it locally, and provides mechanism to slice it for simulation.
+Why This Module Exists
+----------------------
+To provide a reliable, cached stream of historical market data to the simulation engine.
+It abstracts away the complexity of API rate limits, pagination, and local caching.
+
+Responsibilities:
+1.  **Fetching**: Smart pagination to get N days of 15m/1h/4h candles.
+2.  **Caching**: Minimizes API calls by saving JSONs locally.
+3.  **Playback**: Slices the timeline for the `BacktestEngine` to step through.
 """
 import time
 import json
@@ -18,7 +26,7 @@ if backend_dir not in sys.path:
     sys.path.append(backend_dir)
 
 # Import the WORKING api instance from candles.py
-from candles import api
+from market_data.candles import api
 
 logger = logging.getLogger("backtest_data")
 
@@ -209,7 +217,7 @@ class DataLoader:
                     indicator_data[tf] = {}
                     continue
                 
-                from indicators import calculate_all_indicators
+                from market_data.indicators import calculate_all_indicators
                 
                 # Use slightly larger context for calculation
                 slice_for_calc = visible[-150:] 

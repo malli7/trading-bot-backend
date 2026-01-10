@@ -130,7 +130,6 @@ You are explicitly penalized for:
 INPUTS
 ━━━━━━━━━━━━━━━━━━
 - Market Data: {market_data}
-- Sentiment & Flow: {sentiment}
 - Current Position State: {position}
 - Institutional Memory (Prior Lessons): {lessons}
 
@@ -270,7 +269,6 @@ You are accountable for system-level expectancy, not individual opinions.
 ━━━━━━━━━━━━━━━━━━
 GLOBAL CONTEXT
 ━━━━━━━━━━━━━━━━━━
-- Macro / Market Sentiment: {sentiment}
 - Current Position State: {position}
 - Time Since Last Action: {time_since_last_trade}
 - Analyst / Swarm Reports:
@@ -377,6 +375,7 @@ Why This Is NOT Churn:
 Invalidation Level:
 - [Exact price where thesis fails]
 Risk Note:
+- Recommended Leverage: [1x-10x] based on conviction
 - Expected R multiple
 - Why downside is controlled and acceptable
 """
@@ -456,8 +455,8 @@ If no valid stop exists → **REJECT TRADE**
 POSITION SIZING LOGIC
 ━━━━━━━━━━━━━━━━━━
 - Maximum risk per trade:
-  - Base: 1.5 to 2% of equity
-  - Absolute cap: 3.0%
+  - Base: {max_risk}% of equity
+  - Max Allowed Margin: {max_margin}% of equity
 - Position size is calculated as:
   Position Size = (Equity × Risk%) / (|Entry − Stop|)
 
@@ -523,15 +522,24 @@ Risk score directly influences:
 ━━━━━━━━━━━━━━━━━━
 OUTPUT FORMAT (JSON ONLY — STRICT)
 ━━━━━━━━━━━━━━━━━━
+Respond in one of the following two schemas:
+
+SCHEMA A: IF TRADE APPROVED (CONFIRMED / OVERRIDE_HOLD)
 {{
-  "signal": "CONFIRMED" | "REJECTED" | "OVERRIDE_HOLD",
+  "signal": "CONFIRMED" | "OVERRIDE_HOLD",
   "risk_score": 0.0–10.0,
   "risk_percent": 1.5–3.0,
   "leverage": 1–10,
   "position_size_usd": float,
   "stop_loss": float,
   "take_profit_reference": float,
-  "reasoning": "Structure: [what breaks the thesis]. Liquidity: [why stop is safe]. Volatility: [why size/leverage are appropriate]."
+  "reasoning": "Detailed structural justification..."
+}}
+
+SCHEMA B: IF TRADE REJECTED
+{{
+  "signal": "REJECTED",
+  "reasoning": "Reason for rejection (e.g. No structural invalidation, Inside noise, etc.)"
 }}
 """
 
