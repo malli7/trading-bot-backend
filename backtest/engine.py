@@ -157,7 +157,9 @@ class BacktestEngine:
              return
 
         # Run Real Analysis
-        decision = await self.orchestrator._run_analysis_pipeline(symbol, feed, current_prices)
+        # Ensure we pass the raw indicator structure, not the wrapper
+        model_input = feed.get('indicator_data', feed)
+        decision = await self.orchestrator._run_analysis_pipeline(symbol, model_input, current_prices)
         decision["timestamp"] = timestamp_str
         
         await self.mock_account.log_decision(decision)
