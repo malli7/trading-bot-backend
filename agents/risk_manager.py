@@ -19,7 +19,7 @@ from typing import Dict, Any, Optional
 from openai import AsyncOpenAI
 
 # Project Imports
-from prompt import RISK_MANAGER_PROMPT
+from prompts.risk import RISK_MANAGER_PROMPT
 from core.risk_engine import risk_engine
 from core.config import settings
 

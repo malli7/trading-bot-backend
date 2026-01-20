@@ -80,3 +80,18 @@ class AnalysisResponse(BaseModel):
     symbol: str
     market_id: int
     indicator_data: Dict[str, Any]
+
+# =======================
+# Consolidation Models
+# =======================
+class ConsolidationMetrics(BaseModel):
+    """Metrics for market consolidation state."""
+    symbol: str
+    is_consolidating: bool
+    market_state: str # "Trending", "Consolidation", "Strong Trend"
+    adx: float
+    bandwidth: float
+
+class ConsolidationResponse(BaseModel):
+    """Response wrapper for consolidation endpoint."""
+    results: List[ConsolidationMetrics]

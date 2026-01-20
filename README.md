@@ -1,65 +1,90 @@
 
-# Antigravity Trading System (Alpha v2)
+# Antigravity Trading System (Alpha v2.1)
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.13-blue.svg)
 ![Status](https://img.shields.io/badge/status-active-success.svg)
 
-> **Institutional-Grade AI Trading Agent (Neuro-Symbolic Architecture)**.
-> Combines Large Language Models (Swarm Intelligence) with Quantitative Risk Engineering (Volatility Targeting).
+> **Institutional-Grade Hybrid Trading System**.
+> A Neuro-Symbolic architecture combining **Swarm Intelligence** (LLMs) with **Quantitative Risk Engineering** (Volatility Targeting).
 
 ---
 
 ## 📖 Executive Summary
 
-This system is not a standard "if/then" trading bot. It is an **Autonomous Agentic System** designed for Swing Trading crypto assets. It utilizes a **Neuro-Symbolic** approach:
-1.  **AI (Right Brain):** Use LLMs to simulate a specific investment committee ("Swarm") for qualitative analysis (Trend, Structure, Sentiment).
-2.  **Quant (Left Brain):** Use strict mathematical models for Risk Management (Kelly Criterion, Volatility Targeting, Variance Analysis).
+This system bridges the gap between **Discretionary Trading** and **Quantitative Finance**. It is not a black-box AI, but an **Orchestrated Agentic Workflow** that:
 
-The goal is to outperform a passive **BTC Buy & Hold** strategy by avoiding drawdowns in "Choppy" regimes and sizing up aggressively in "Trending" regimes.
+1.  **Perceives (Right Brain):** Uses LLMs (Gemini, GPT-4) to read market structure, sentiment, and trend quality just like a human trader.
+2.  **Protects (Left Brain):** Uses strict Mathematical Risk Engines (Kelly Criterion, Volatility Targeting) to size positions and enforce hard stops.
+3.  **Adapts (Memory):** Uses a Reflection Agent to review past trades (and missed opportunities), generating "Lessons" that are injected into future decisions.
 
 ---
 
 ## 🏗 System Architecture
 
-The codebase follows a modular **Service-Oriented Architecture (SOA)** with strict separation of concerns.
+The codebase follows a modular **Service-Oriented Architecture (SOA)**.
+
+### Core Components
+
+| Module | Component | Responsibility |
+| :--- | :--- | :--- |
+| **Orchestrator** | `services/orchestrator.py` | The Central "Conductor". Manages the linear `See -> Think -> Act` lifecycle for all assets. |
+| **Swarm Agent** | `agents/swarm.py` | **(Standard Mode)** A "Council" of LLM personas (Trend, MeanRev, Scalper) that debate and vote on direction. |
+| **Simple Agent** | `agents/simple_agent.py` | **(Fast Mode)** A single-shot, high-reasoning agent (Gemini 2.0 Flash) optimized for speed and lower latency. |
+| **Risk Agent** | `agents/risk_manager.py` | "The Safety Officer". Validates Swarm signals against technical invalidations and account limits. |
+| **Reflection** | `agents/reflection.py` | "The Critic". Runs post-mortems on closed trades and audits "Skipped" trades to find missed pumps. |
+| **Smart Cache** | `core/cache.py` | Prevents redundant LLM calls during low-volatility/flat market conditions to save costs. |
+
+### Logic Flow
 
 ```mermaid
 graph TD
-    Data[Market Data Service] -->|OHLCV + Indicators| Orchestrator
+    Data[Market Data] -->|OHLCV + Indicators| Orch[Orchestrator]
     
-    subgraph "Cognitive Layer (Agents)"
-        Swarm[Swarm Intelligence]
-        Reflect[Reflection Agent]
-        RiskAgent[Risk Officer Agent]
+    subgraph "Decision Engine"
+        Orch -->|Select Mode| Mode{Mode?}
+        Mode -->|Simple| Simple[Simple Agent]
+        Mode -->|Swarm| Swarm[Swarm Intelligence]
+        
+        Simple -->|Signal| Risk[Risk Manager]
+        Swarm -->|Consensus| Risk
     end
     
-    subgraph "Mathematical Layer (Core)"
-        RiskEng[Risk Engine (Vol Target)]
-        PortHeat[Correlation Matrix]
+    subgraph "Risk Layer (Math)"
+        Risk -->|Consults| VolTarget[Vol Target Engine]
+        Risk -->|Consults| Corr[Correlation Matrix]
+        VolTarget -->|Hard Cap| Risk
     end
     
-    Orchestrator -->|Context| Swarm
-    Orchestrator -->|Performance| Reflect
+    Risk -->|Final Order| Orch
+    Orch -->|Execute| MongoDB[(Database)]
     
-    Swarm -->|Proposed Trade| Orchestrator
-    Orchestrator -->|Validation| RiskAgent
-    
-    RiskAgent -.->|Consults| RiskEng
-    RiskEng -.->|Hard Limits| RiskAgent
-    
-    Orchestrator -->|Execution| Account[Execution Service]
-    Account -->|Persistence| MongoDB[(MongoDB)]
+    subgraph "Learning Loop"
+        MongoDB -->|History| Reflect[Reflection Agent]
+        Reflect -->|New Lessons| Simple
+        Reflect -->|New Lessons| Swarm
+    end
 ```
 
-### Key Modules
-| Module | Responsibility | key Technology |
-| :--- | :--- | :--- |
-| **`services/orchestrator.py`** | The "Brain". Manages the Learn -> Think -> Act loop. | AsyncIO, Dependency Injection |
-| **`agents/swarm.py`** | "Alpha Hunters". Multiple LLM personas (Trend, Mean Rev) debate direction. | Chain-of-Thought Prompting |
-| **`agents/risk_manager.py`** | "The Gatekeeper". Synthesizes Math limits with AI intuition. | OpenAI API, JSON Mode |
-| **`core/risk_engine.py`** | "The Law". Calculates Volatility Adjusted Sizing & Correlation Penalties. | ATR, Standard Deviation |
-| **`backtest/run.py`** | Time-Travel Simulator. Replays historical data through the *exact* live agents. | Parallel Processing |
+---
+
+## ⚙️ Operating Modes
+
+The system supports two distinct operation modes, configurable via `ENTRY_MODE` in `config.py` or runtime overrides.
+
+### 1. Swarm Mode (Default)
+*   **Best For:** Complex market conditions requiring diverse perspectives.
+*   **Logic:** Spawns 3 diverse agents (Trend Follower, Contrarian, Whale Watcher).
+*   **Aggregation:** A "Master" LLM synthesizes their disparate specific views into a final confidence score.
+*   **Cost:** Higher (4 LLM calls per asset).
+*   **Latency:** ~15-30s.
+
+### 2. Simple Mode (Fast)
+*   **Best For:** High-frequency checks or clear trending markets.
+*   **Logic:** Uses a single, high-IQ model (e.g., Gemini 2.0 Flash) with a massive context window.
+*   **Feature:** Includes "Smart Caching" — if price/RSI hasn't moved significantly since the last check, it returns the cached decision instantly (0s latency).
+*   **Cost:** Low (1 LLM call per asset, often 0).
+*   **Latency:** <5s.
 
 ---
 
@@ -68,72 +93,46 @@ graph TD
 ### Prerequisites
 *   Python 3.10+
 *   MongoDB (cloud or local)
-*   OpenRouter API Key (Supports GPT-4, Claude 3.5, Llama 3)
+*   OpenRouter API Key (Supports Gemini 2.0, GPT-4o, Claude 3.5)
 
 ### Installation
 
-1.  **Clone the Repository**
+1.  **Clone & Install**
     ```bash
     git clone https://github.com/malli7/trading-bot-backend.git
     cd trading-bot-backend
-    ```
-
-2.  **Install Dependencies**
-    It is recommended to use a virtual environment.
-    ```bash
     python -m venv virtual
     source virtual/bin/activate
     pip install -r requirements.txt
     ```
 
-3.  **Configuration**
-    Create a `.env` file in the project root:
+2.  **Environment Setup**
+    Create a `.env` file:
     ```env
     OPENROUTER_API_KEY=sk-or-v1-...
     MONGO_URI=mongodb+srv://...
+    TRADING_MODE=SIMPLE  # or SWARM
     ```
 
-### Running the System
-
-**Live Trading Mode:**
-Starts the `TradingOrchestrator` service running on a 15-minute cron schedule.
-```bash
-python main.py
-```
-
-**Backtest Mode:**
-Simulates the last N days using historical data.
-```bash
-python backtest/run.py --days 30
-```
+3.  **Run System**
+    ```bash
+    # Starts API Server @ http://localhost:8001
+    python main.py
+    ```
 
 ---
 
 ## 🧠 Risk Management (The "Alpha")
 
-Most retail bots fail because they act as "Gamblers". This system acts as a "Casino".
+Most retail bots fail because they over-leverage. This system prioritizes **Survival**.
 
-### 1. Volatility Targeting
-We do not use fixed sizing (e.g., "$100 per trade").
-*   **Formula:** `Size = (Target_Vol / Instrument_Vol) * Equity`
-*   **Effect:** If Bitcoin becomes highly volatile, position size **reduces** automatically. If Bitcoin is stable, size **increases**. This keeps portfolio heat constant.
-
-### 2. Correlation Checks
-The `RiskEngine` calculates exposure to "Crypto Beta".
-*   If you are Long BTC, the system applies a "Correction Penalty" to a proposed Long ETH trade, preventing over-leveraging on correlated assets.
-
-### 3. Validation
-The `RiskAssessmentAgent` (LLM) is given the "Hard Cap" from the math engine. It can lower the risk based on news/sentiment, but it is **forbidden** from exceeding the mathematical safety limit.
+*   **Volatility Targeting:** Position size is inversely proportional to asset volatility (ATR). High Vol = Small Size.
+*   **Correlation Penalty:** If you are Long BTC, the system reduces size on Long ETH to prevent concentrated account risk.
+*   **Infinite PnL Protection:** The "Risk Agent" is grounded by a rigid Python `RiskEngine` that physically prevents orders exceeding strict Kelly/Vol-Target limits.
 
 ---
 
-## ⚠️ Important Disclaimer
+## ⚠️ Disclaimer
 
-**For Educational and Research Purposes Only.**
-
-*   Cryptocurrency trading involves substantial risk of loss and is not suitable for every investor.
-*   This software is provided "AS IS", without warranty of any kind.
-*   Past performance (backtesting) is NOT indicative of future results.
-*   The authors are not registered financial advisors.
-
----
+**For Research & Educational Use Only.**
+This software is a prototype for exploring Large Language Model capabilities in financial contexts. It is not financial advice. Use at your own risk.

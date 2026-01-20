@@ -33,6 +33,7 @@ from agents.reflection import ReflectionAgent
 from agents.swarm import SwarmAnalyst
 from agents.portfolio import PortfolioManager
 from agents.risk_manager import RiskAssessmentAgent
+from agents.simple_agent import SimpleAgent
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -47,6 +48,7 @@ class TradingOrchestrator:
         self.swarm = SwarmAnalyst()
         self.portfolio = PortfolioManager()
         self.risk_agent = RiskAssessmentAgent()
+        self.simple_agent = SimpleAgent()
         
         # Clients
         self.client = AsyncOpenAI(
@@ -54,11 +56,13 @@ class TradingOrchestrator:
              api_key=settings.OPENROUTER_API_KEY
         )
 
-    async def run_cycle(self) -> Dict[str, Any]:
+    async def run_cycle(self, override_mode: Optional[str] = None) -> Dict[str, Any]:
         """
         Executes a full trading cycle: See -> Learn -> Think -> Act.
+        override_mode: "SWARM" or "SIMPLE" (overrides global settings)
         """
         logger.info("=== Starting Trading Cycle ===")
+        mode = override_mode if override_mode else settings.TRADING_MODE
         
         # 1. SEE: Data Collection
         market_data, current_prices = await self._fetch_market_data()
@@ -66,6 +70,9 @@ class TradingOrchestrator:
         # 2. UPDATE: Synchronize Account State
         if account.demo_account.collection is None:
              await account.demo_account.initialize()
+        
+        # Sync with DB (in case of Reset or external changes)
+        await account.demo_account.load_state()
         await account.demo_account.update_positions(current_prices)
         
         # 3. LEARN: Reflection (Parallel)
@@ -82,10 +89,10 @@ class TradingOrchestrator:
         for symbol, data in market_data.items():
             if symbol not in current_prices:
                 continue
-            tasks.append(self._run_analysis_pipeline(symbol, data, current_prices))
+            tasks.append(self._run_analysis_pipeline(symbol, data, current_prices, mode))
             
         # Execute Robustly
-        logger.info(f"Analyzing {len(tasks)} assets in parallel...")
+        logger.info(f"Analyzing {len(tasks)} assets in parallel... (Mode: {mode})")
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
         for res in results:
@@ -103,6 +110,7 @@ class TradingOrchestrator:
         return {
             "status": "success",
             "timestamp": datetime.utcnow().isoformat(),
+            "mode": mode,
             "decisions": decisions,
             "account": {
                 "balance": account.demo_account.cash,
@@ -144,7 +152,9 @@ class TradingOrchestrator:
         self, 
         symbol: str, 
         data: Dict[str, Any], 
-        current_prices: Dict[str, float]
+        current_prices: Dict[str, float],
+        mode: str,
+        current_time: Optional[float] = None
     ) -> Dict[str, Any]:
         """
         The Core Intelligence Pipeline: Swarm -> Portfolio -> Risk.
@@ -155,26 +165,67 @@ class TradingOrchestrator:
         current_price = current_prices[symbol]
         current_position = account.demo_account.positions.get(symbol)
         
-        # B. Swarm (The Mind)
-        swarm_result = await self.swarm.get_consensus(data, current_position)
+        # Calculate Time Since Last Trade
+        time_since_str = "Never"
+        last_time = await account.demo_account.get_last_action_time(symbol)
+        if last_time:
+             # Use current_time if provided (Backtest), else UTC now
+             now_ts = datetime.utcfromtimestamp(current_time) if current_time else datetime.utcnow()
+             diff = now_ts - last_time
+             # Format nicely
+             if diff.days > 0:
+                 time_since_str = f"{diff.days} days ago"
+             elif diff.seconds > 3600:
+                 time_since_str = f"{diff.seconds // 3600} hours ago"
+             else:
+                 time_since_str = f"{diff.seconds // 60} minutes ago"
         
-        # C. Portfolio (The Allocator)
-        decision = self.portfolio.allocate(
-            signal=swarm_result["signal"], 
-            confidence=swarm_result["confidence"], 
-            coin=symbol, 
-            price=current_price,
-            current_position=current_position,
-            swarm_reason=swarm_result.get("rationale"),
-            swarm_invalidation=swarm_result.get("invalidation"),
-            suggested_leverage=swarm_result.get("suggested_leverage")
-        )
-        
-        # D. Risk (The Safety) - For Entries Only
-        if decision["signal"] in ["buy_to_enter", "sell_to_enter"]:
-             decision = await self._validate_with_risk_agent(decision, symbol, current_price, swarm_result, data)
-             
-        return decision
+        # B. Swarm (The Mind) OR Simple Agent
+        if mode == "SIMPLE":
+            logger.info("Running in SIMPLE MODE (Single Agent)...")
+            # 1. Simple Analysis (includes Risk Logic)
+            swarm_result = await self.simple_agent.analyze(symbol, data, current_prices, current_time=current_time)
+            
+            # 2. Portfolio Allocation (Sizing & Confidence Check)
+            decision = self.portfolio.allocate(
+                signal=swarm_result["signal"], 
+                confidence=swarm_result["confidence"], 
+                coin=symbol, 
+                price=current_price,
+                current_position=current_position,
+                swarm_reason=swarm_result.get("rationale"),
+                swarm_invalidation=swarm_result.get("invalidation"),
+                suggested_leverage=swarm_result.get("suggested_leverage")
+            )
+            
+            # 3. Risk Verification (Hardening Simple Mode)
+            # We now pipe the Simple Agent's signal through the Risk Agent for vetting.
+            if decision["signal"] in ["buy_to_enter", "sell_to_enter"]:
+                decision = await self._validate_with_risk_agent(decision, symbol, current_price, swarm_result, data)
+                
+            return decision
+
+        else:
+            # --- STANDARD SWARM MODE ---
+            swarm_result = await self.swarm.get_consensus(symbol, data, current_position, time_since_str, current_time=current_time)
+            
+            # C. Portfolio (The Allocator)
+            decision = self.portfolio.allocate(
+                signal=swarm_result["signal"], 
+                confidence=swarm_result["confidence"], 
+                coin=symbol, 
+                price=current_price,
+                current_position=current_position,
+                swarm_reason=swarm_result.get("rationale"),
+                swarm_invalidation=swarm_result.get("invalidation"),
+                suggested_leverage=swarm_result.get("suggested_leverage")
+            )
+            
+            # D. Risk (The Safety) - For Entries Only
+            if decision["signal"] in ["buy_to_enter", "sell_to_enter"]:
+                decision = await self._validate_with_risk_agent(decision, symbol, current_price, swarm_result, data)
+                
+            return decision
 
     async def _validate_with_risk_agent(
         self, 
@@ -236,7 +287,7 @@ class TradingOrchestrator:
             
         # Execute Signal
         signal = dec["signal"]
-        if signal not in ["skip_trade", "HOLD", "WAIT"]:
+        if signal not in ["skip_trade", "SKIP_TRADE", "HOLD", "WAIT"]:
              price = current_prices.get(coin, 0.0)
              if price > 0:
                  await account.demo_account.execute_trade(dec, price)
@@ -244,8 +295,8 @@ class TradingOrchestrator:
 # Global Instance
 orchestrator = TradingOrchestrator()
 
-async def run_agent_cycle() -> Dict[str, Any]:
+async def run_agent_cycle(mode: Optional[str] = None) -> Dict[str, Any]:
     """
     Main entry point hook.
     """
-    return await orchestrator.run_cycle()
+    return await orchestrator.run_cycle(override_mode=mode)

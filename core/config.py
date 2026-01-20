@@ -30,10 +30,22 @@ class Settings(BaseSettings):
     OPENROUTER_API_KEY: str = ""
     MONGO_URI: str = "mongodb://localhost:27017"
     
+    # --- System Config ---
+    TRADING_MODE: str = "SWARM" # Options: "SWARM", "SIMPLE"
+    SIMPLE_MODEL_ID: str = "google/gemini-3-flash-preview" # Fast, high-reasoning model for single-shot mode
+
+    
     # --- Account / Trading Config ---
     ACCOUNT_INITIAL_BALANCE: float = 1000.0
     MAX_RISK_PER_TRADE: float = 0.02  # 2% of equity
     MAX_MARGIN_PER_POS: float = 0.20  # 20% of equity
+    TRADING_FEE_RATE: float = 0.001   # 0.1% Taker Fee
+
+    # --- Smart Cache Config ---
+    CACHE_EXPIRY_SECONDS: int = 300          # 5 minutes
+    CHANGE_THRESHOLD_PRICE: float = 0.002    # 0.2% price change
+    CHANGE_THRESHOLD_RSI: float = 4.0        # 4 point RSI change
+    CHANGE_THRESHOLD_ADX: float = 2.0        # 2 point ADX change
 
     # --- Portfolio Agent Config ---
     PORTFOLIO_MAX_POS_SIZE: float = 0.30     # 30% max per trade
@@ -63,6 +75,13 @@ class Settings(BaseSettings):
         (1, "BTC"),
         (2, "SOL")
     ]
+    
+    DEFAULT_TIMEFRAME: str = "15m"
+
+    @property
+    def MARKET_ID_MAP(self) -> Dict[int, str]:
+        """Auto-generates ID to Symbol map from TRACKED_ASSETS."""
+        return {mid: symbol for mid, symbol in self.TRACKED_ASSETS}
     
 
 

@@ -41,10 +41,11 @@ class BacktestEngine:
         self.fetch_limit = fetch_limit
         
         # Heuristics Configuration
-        self.SKIP_RSI_LOWER = 45
-        self.SKIP_RSI_UPPER = 55
+        self.SKIP_RSI_LOWER = 40
+        self.SKIP_RSI_UPPER = 60
         self.SKIP_CHANGE_PCT_MAJORS = 0.2 # BTC, ETH
         self.SKIP_CHANGE_PCT_VOLATILE = 0.3 # SOL
+        self.SKIP_BANDWIDTH_THRESHOLD = 0.15 # If BB Width < 15%, DO NOT SKIP (Potential Squeeze)
 
         
         # State
@@ -102,6 +103,7 @@ class BacktestEngine:
         # Extract metadata for heuristics
         current_prices = {}
         rsi_values = {}
+        squeeze_values = {}
         
         for symbol, data in market_data.items():
             mid_prices = data.get('indicator_data', {}).get('15m', {}).get('midPrices', [])
@@ -111,6 +113,10 @@ class BacktestEngine:
             rsi_series = data.get('indicator_data', {}).get('15m', {}).get('rsi14', [])
             if rsi_series:
                 rsi_values[symbol] = rsi_series[-1]
+
+            sqz_series = data.get('indicator_data', {}).get('15m', {}).get('squeeze_bandwidth', [])
+            if sqz_series:
+                squeeze_values[symbol] = sqz_series[-1]
 
         # B. Update Account (Mark-to-Market)
         await self.mock_account.update_positions(current_prices)
@@ -122,7 +128,7 @@ class BacktestEngine:
         # D. Swarm Analysis (Parallel)
         tasks = []
         for symbol, feed in market_data.items():
-            tasks.append(self._analyze_asset(symbol, feed, current_prices, rsi_values, current_time_str))
+            tasks.append(self._analyze_asset(symbol, feed, current_prices, rsi_values, squeeze_values, current_time_str, current_ts))
             
         if tasks:
             await asyncio.gather(*tasks)
@@ -136,7 +142,9 @@ class BacktestEngine:
         feed: Dict, 
         current_prices: Dict[str, float], 
         rsi_values: Dict[str, float],
-        timestamp_str: str
+        squeeze_values: Dict[str, float],
+        timestamp_str: str,
+        current_ts: float
     ):
         """
         Run Orchestrator pipeline for one asset, with 'Fast Mode' skipping.
@@ -144,7 +152,8 @@ class BacktestEngine:
         if symbol not in current_prices: return
         
         # check skip
-        if self._should_skip(symbol, current_prices[symbol], rsi_values.get(symbol)):
+        squeeze_val = squeeze_values.get(symbol)
+        if self._should_skip(symbol, current_prices[symbol], rsi_values.get(symbol), squeeze_val):
              # Log HOLD and exit
              decision = {
                  "coin": symbol,
@@ -159,7 +168,13 @@ class BacktestEngine:
         # Run Real Analysis
         # Ensure we pass the raw indicator structure, not the wrapper
         model_input = feed.get('indicator_data', feed)
-        decision = await self.orchestrator._run_analysis_pipeline(symbol, model_input, current_prices)
+        decision = await self.orchestrator._run_analysis_pipeline(
+            symbol, 
+            model_input, 
+            current_prices, 
+            mode=settings.TRADING_MODE,
+            current_time=current_ts
+        )
         decision["timestamp"] = timestamp_str
         
         await self.mock_account.log_decision(decision)
@@ -168,7 +183,7 @@ class BacktestEngine:
         if decision["signal"] not in ["skip_trade", "HOLD", "WAIT"]:
              await self.mock_account.execute_trade(decision, current_prices[symbol])
 
-    def _should_skip(self, symbol: str, current_price: float, rsi: Optional[float]) -> bool:
+    def _should_skip(self, symbol: str, current_price: float, rsi: Optional[float], squeeze_bandwidth: Optional[float]) -> bool:
         """
         Heuristic to determine if we should waste tokens on this candle.
         """
@@ -193,8 +208,14 @@ class BacktestEngine:
         if rsi:
             is_rsi_neutral = (self.SKIP_RSI_LOWER <= rsi <= self.SKIP_RSI_UPPER)
             
-        # Decision: SKIP if (Small Move) AND (RSI is Neutral or Missing)
+        # Decision: SKIP if (Small Move) AND (RSI is Neutral or Missing) ... BUT ONLY IF NO SQUEEZE
+        # If Bandwidth is Low (< Threshold), we MUST analyze because it's a Breakout Setup.
+        is_squeeze = (squeeze_bandwidth is not None and squeeze_bandwidth < self.SKIP_BANDWIDTH_THRESHOLD)
+
         if pct_change < threshold and is_rsi_neutral:
+            # Override skipping if it is a squeeze
+            if is_squeeze:
+                return False 
             return True
             
         return False

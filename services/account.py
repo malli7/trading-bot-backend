@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 INITIAL_BALANCE = settings.ACCOUNT_INITIAL_BALANCE
 
+
 class PaperTradingAccount:
     """
     Manages a virtual trading account state backed by MongoDB.
@@ -40,7 +41,6 @@ class PaperTradingAccount:
     Attributes:
         cash (float): Available cash balance.
         positions (Dict): Open positions keyed by symbol.
-        history (List): Trade history log.
         db (AsyncIOMotorDatabase): MongoDB Database reference.
     """
     
@@ -48,12 +48,13 @@ class PaperTradingAccount:
         self.initial_balance = initial_balance
         self.cash = initial_balance
         self.positions: Dict[str, Dict[str, Any]] = {} 
-        self.history: List[Dict[str, Any]] = []
+        # self.history removed to avoid memory/doc size issues
         
         # Database connections (Initialized lazily)
         self.db_client: Optional[AsyncIOMotorClient] = None
         self.db: Optional[AsyncIOMotorDatabase] = None
         self.collection = None
+        self.history_collection = None
         self.sentiment_collection = None
         self.lessons_collection = None
         self.decision_collection = None
@@ -72,6 +73,7 @@ class PaperTradingAccount:
             
             # Setup Collections
             self.collection = self.db.get_collection("account_state")
+            self.history_collection = self.db.get_collection("trade_history") # New collection
             self.lessons_collection = self.db.get_collection("lessons_learned")
             self.decision_collection = self.db.get_collection("decision_logs")
             self.sentiment_collection = self.db.get_collection("sentiment_logs")
@@ -81,16 +83,13 @@ class PaperTradingAccount:
         except Exception as e:
             logger.error(f"Failed to connect to MongoDB: {e}")
 
+    # ... log_decision, log_sentiment, save_lesson ... (unchanged logic, skipping re-write in tool call if possible, but simpler to replace block if contiguous)
+    # Actually, execute_trade and getters are lower down.
+    # I will replace the block from init to reset_account, keeping the logging helpers if they are in between.
+    
     async def log_decision(self, decision: Dict[str, Any]) -> None:
-        """
-        Log every decision (Trade/Skip/Hold) for Reflection.
-        
-        Args:
-            decision: Dictionary containing trade signal and reasoning.
-        """
-        if self.decision_collection is None:
-            return
-            
+        """Log every decision (Trade/Skip/Hold)."""
+        if self.decision_collection is None: return
         try:
             doc = decision.copy()
             doc["timestamp"] = datetime.utcnow().isoformat()
@@ -100,26 +99,15 @@ class PaperTradingAccount:
 
     async def log_sentiment_analysis(self, data: Dict[str, Any]) -> None:
         """Persist sentiment analysis results."""
-        if self.sentiment_collection is None:
-            return
-            
+        if self.sentiment_collection is None: return
         try:
             await self.sentiment_collection.insert_one(data)
-            logger.info("Sentiment Analysis saved to MongoDB")
         except Exception as e:
             logger.error(f"Failed to save sentiment analysis: {e}")
 
     async def save_lesson(self, lesson: str, source_decision_id: Optional[str] = None) -> None:
-        """
-        Save a learned lesson to the database.
-        
-        Args:
-            lesson: The text content of the lesson.
-            source_decision_id: Optional ID of the decision that triggered this lesson (for deduplication).
-        """
-        if self.lessons_collection is None:
-            return
-        
+        """Save a learned lesson to the database."""
+        if self.lessons_collection is None: return
         try:
             doc = {
                 "timestamp": datetime.utcnow().isoformat(),
@@ -133,9 +121,7 @@ class PaperTradingAccount:
 
     async def get_recent_lessons(self, limit: int = 5) -> List[str]:
         """Fetch the most recent lessons learned."""
-        if self.lessons_collection is None:
-            return []
-        
+        if self.lessons_collection is None: return []
         try:
             cursor = self.lessons_collection.find().sort("timestamp", -1).limit(limit)
             lessons = []
@@ -147,17 +133,29 @@ class PaperTradingAccount:
             return []
 
     async def load_state(self) -> None:
-        """Load account balance and positions from MongoDB."""
-        if self.collection is None:
-            return
+        """Load account balance and positions. Migrate history if needed."""
+        if self.collection is None: return
 
         try:
-            # We use a fixed ID for the single account
             data = await self.collection.find_one({"_id": "account_main"})
             if data:
                 self.cash = float(data.get("cash", self.initial_balance))
                 self.positions = data.get("positions", {})
-                self.history = data.get("history", [])
+                
+                # MIGRATION: Check for legacy history list
+                legacy_history = data.get("history")
+                if legacy_history and isinstance(legacy_history, list) and len(legacy_history) > 0:
+                    logger.warning(f"Migrating {len(legacy_history)} trades to 'trade_history' collection...")
+                    if self.history_collection is not None:
+                        # Bulk insert
+                        await self.history_collection.insert_many(legacy_history)
+                        # Remove from account_state
+                        await self.collection.update_one(
+                            {"_id": "account_main"}, 
+                            {"$unset": {"history": ""}}
+                        )
+                    logger.info("Migration complete.")
+                
                 logger.info("Account state loaded from MongoDB")
             else:
                 logger.info("No existing account state found, starting fresh.")
@@ -166,59 +164,53 @@ class PaperTradingAccount:
             logger.error(f"Failed to load state from DB: {e}")
 
     async def save_state(self) -> None:
-        """Persist current account state to MongoDB."""
-        if self.collection is None:
-            return
+        """Persist current account state (excluding history)."""
+        if self.collection is None: return
 
         try:
             data = {
                 "_id": "account_main",
                 "cash": self.cash,
                 "positions": self.positions,
-                "history": self.history,
                 "last_updated": datetime.utcnow().isoformat()
             }
+            # History is NOT saved here anymore
             await self.collection.replace_one({"_id": "account_main"}, data, upsert=True)
         except Exception as e:
             logger.error(f"Failed to save state to DB: {e}")
 
+    async def get_history(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Fetch trade history from separate collection."""
+        if self.history_collection is None: return []
+        try:
+            cursor = self.history_collection.find().sort("time", -1).limit(limit)
+            results = []
+            async for doc in cursor:
+                if "_id" in doc:
+                    doc["_id"] = str(doc["_id"])
+                results.append(doc)
+            return results
+        except Exception as e:
+            logger.error(f"Failed to get history: {e}")
+            return []
+
     async def reset_account(self) -> None:
-        """
-        Reset changes in memory and drop the collection in MongoDB.
-        """
+        """Reset changes and drop collections."""
         self.cash = self.initial_balance
         self.positions = {}
-        self.history = []
+        # self.history = [] # Removed
 
         if self.collection is not None:
-            try:
-                await self.collection.drop()
-                logger.info("Account collection dropped.")
-            except Exception as e:
-                logger.error(f"Failed to drop account collection: {e}")
-
+            await self.collection.drop()
         if self.decision_collection is not None:
-            try:
-                await self.decision_collection.drop()
-                logger.info("Decision logs collection dropped.")
-            except Exception as e:
-                logger.error(f"Failed to drop decision logs: {e}")
-
+            await self.decision_collection.drop()
         if self.lessons_collection is not None:
-            try:
-                await self.lessons_collection.drop()
-                logger.info("Lessons learned collection dropped.")
-            except Exception as e:
-                logger.error(f"Failed to drop lessons collection: {e}")
-
+            await self.lessons_collection.drop()
         if self.sentiment_collection is not None:
-            try:
-                await self.sentiment_collection.drop()
-                logger.info("Sentiment logs collection dropped.")
-            except Exception as e:
-                logger.error(f"Failed to drop sentiment logs: {e}")
-        
-        # Save the fresh state immediately so the DB has the initial record
+            await self.sentiment_collection.drop()
+        if self.history_collection is not None:
+            await self.history_collection.drop() # Drop separate history
+
         await self.save_state()
         logger.info("Account reset complete.")
 
@@ -250,11 +242,6 @@ class PaperTradingAccount:
     async def close_position(self, coin: str, current_price: float, reason: str = "SIGNAL") -> None:
         """
         Close an existing position.
-        
-        Args:
-            coin: The asset symbol.
-            current_price: The exit price.
-            reason: Reason for closing (SIGNAL, STOP_LOSS, TAKE_PROFIT).
         """
         if coin not in self.positions:
             return
@@ -270,10 +257,18 @@ class PaperTradingAccount:
             pnl = (entry - current_price) * qty
             
         returned_amount = margin + pnl
+        
+        # Deduct Exit Fee
+        exit_value = current_price * qty
+        fee = exit_value * settings.TRADING_FEE_RATE
+        returned_amount -= fee
+        
         self.cash += returned_amount
         
-        logger.info(f"Closed {coin} ({reason}). PnL: {pnl:.2f}. New Balance: {self.cash:.2f}")
-        self.history.append({
+        logger.info(f"Closed {coin} ({reason}). PnL: {pnl:.2f}. Fee: {fee:.2f}. New Balance: {self.cash:.2f}")
+        
+        # Log to History Collection
+        log_entry = {
             "action": "close", 
             "coin": coin, 
             "price": current_price, 
@@ -281,7 +276,10 @@ class PaperTradingAccount:
             "reason": reason,
             "time": datetime.utcnow().isoformat(), 
             "result": "CLOSED"
-        })
+        }
+        if self.history_collection is not None:
+            await self.history_collection.insert_one(log_entry)
+            
         await self.save_state()
 
     async def update_positions(self, current_prices: Dict[str, float]) -> None:
@@ -343,6 +341,63 @@ class PaperTradingAccount:
             await self.save_state()
             logger.info(f"Updated metadata for {coin} position.")
 
+    def _calculate_safe_quantity(self, current_price: float, decision: Dict[str, Any]) -> float:
+        """
+        Calculate the safe trade quantity based on Risk, Margin, and Cash limits.
+        """
+        leverage = int(decision.get("leverage", 1))
+        stop_loss = decision.get("stop_loss")
+        account_value = self.total_value
+
+        # 1. Zero Check
+        if current_price <= 0: return 0.0
+
+        # 2. Risk Sizing
+        risk_per_share = abs(current_price - float(stop_loss)) if stop_loss else 0.0
+        
+        if risk_per_share == 0:
+            qty_risk = float('inf')
+        else:
+            max_risk_allowed = account_value * settings.MAX_RISK_PER_TRADE
+            qty_risk = max_risk_allowed / risk_per_share
+            
+        # 3. Margin Sizing
+        max_margin_allowed = account_value * settings.MAX_MARGIN_PER_POS
+        max_position_value = max_margin_allowed * leverage
+        qty_margin = max_position_value / current_price
+        
+        # 4. Cash Constraint
+        qty_cash = (self.cash * leverage) / current_price
+        
+        # 5. AI Recommendation
+        qty_ai = float('inf')
+        if "position_size_usd" in decision:
+            ai_size = decision["position_size_usd"]
+            if ai_size and ai_size > 0:
+                qty_ai = ai_size / current_price
+                
+        return min(qty_risk, qty_margin, qty_cash, qty_ai)
+
+    async def get_last_action_time(self, symbol: str) -> Optional[datetime]:
+        """
+        Retrieve the datetime of the last action.
+        Uses efficient Mongo query instead of array scan.
+        """
+        if self.history_collection is None:
+            return None
+            
+        try:
+            # Sort descending by time, matching symbol
+            doc = await self.history_collection.find_one(
+                {"coin": symbol},
+                sort=[("time", -1)]
+            )
+            if doc and "time" in doc:
+                return datetime.fromisoformat(doc["time"])
+        except Exception as e:
+             logger.error(f"Error checking last action time: {e}")
+        return None
+
     async def execute_trade(self, decision: Dict[str, Any], current_price: float) -> None:
         """
         Execute a trade entry based on a decision.
@@ -364,63 +419,39 @@ class PaperTradingAccount:
                 logger.warning(f"Position already exists for {coin}, skipping {signal}")
                 return
             
-            # Position Sizing Logic
+            # 1. Validation
             leverage = int(decision.get("leverage", 1))
             stop_loss = decision.get("stop_loss")
             
-            # 1. Validation
             if not stop_loss:
                 logger.warning(f"Stop Loss missing for {coin}, cannot calculate risk. Skipping.")
                 return
 
-            entry_price = current_price
-            
-            # 2. Risk-Based Sizing: Risk per share = |Entry - StopLoss|
-            risk_per_share = abs(entry_price - float(stop_loss))
-            if risk_per_share == 0:
-                logger.warning("Stop loss equals entry price, invalid.")
-                return
-
-            # Max Risk Allowed = settings.MAX_RISK_PER_TRADE of Total Account Value
-            account_value = self.total_value
-            max_risk_allowed = account_value * settings.MAX_RISK_PER_TRADE
-            
-            qty_risk = max_risk_allowed / risk_per_share
-            
-            # 3. Margin-Based Sizing: Max Margin Allowed = settings.MAX_MARGIN_PER_POS of Total Account Value
-            max_margin_allowed = account_value * settings.MAX_MARGIN_PER_POS
-            
-            # Position Value = Margin * Leverage
-            max_position_value = max_margin_allowed * leverage
-            
-            qty_margin = max_position_value / entry_price
-            
-            # 4. Cash Constraint (Hard Limit)
-            qty_cash = (self.cash * leverage) / entry_price
-
-            # 5. AI Recommended Sizing (Optional Override)
-            qty_ai = float('inf')
-            if "position_size_usd" in decision:
-                ai_size_usd = decision["position_size_usd"]
-                if ai_size_usd > 0:
-                     qty_ai = ai_size_usd / entry_price
-                     logger.info(f"Risk Agent requested size: ${ai_size_usd:.2f} ({qty_ai:.4f} units)")
-
-            # 6. Final Quantity (Min of Risk Cap, Margin Cap, Cash, and AI Target)
-            quantity = min(qty_risk, qty_margin, qty_cash, qty_ai)
+            # 2. Calculate Quantity (Helper Refactor)
+            quantity = self._calculate_safe_quantity(current_price, decision)
             
             if quantity <= 0:
                 logger.warning(f"Calculated quantity is {quantity}, skipping.")
                 return
 
-            # Recalculate margin required for the final quantity
+            # 3. Fee Check & Execution
             position_value_usd = quantity * current_price
-            margin_required = position_value_usd / leverage
             
-            if margin_required > self.cash:
-                 quantity = (self.cash * leverage) / current_price
-                 margin_required = self.cash
+            # Deduct Entry Fee
+            fee = position_value_usd * settings.TRADING_FEE_RATE
+            if (self.cash - fee) <= 0:
+                 logger.warning("Not enough cash for fees.")
+                 return
+                 
+            # Deduct Margin
+            margin_required = position_value_usd / leverage
+            if margin_required > (self.cash - fee):
+                 # Auto-adjust if fee reduced cash below margin req
+                 # Strict Approach: Fail
+                 logger.warning(f"Insufficient cash for Margin + Fee. Req: {margin_required+fee}, Avail: {self.cash}")
+                 return
 
+            self.cash -= fee
             self.cash -= margin_required
             
             self.positions[coin] = {
@@ -439,10 +470,10 @@ class PaperTradingAccount:
             
             logger.info(f"Executed {signal} on {coin}. "
                         f"Price: {current_price}, Qty: {quantity:.4f}, Lev: {leverage}x. "
-                        f"Margin: {margin_required:.2f} (Limit: {max_margin_allowed:.2f}). "
-                        f"Risk: {risk_per_share*quantity:.2f} (Limit: {max_risk_allowed:.2f})")
-                        
-            self.history.append({
+                        f"Margin: {margin_required:.2f}. "
+                        f"Fee: {fee:.2f}. ")
+            
+            entry_log = {
                 "action": signal, 
                 "coin": coin, 
                 "price": current_price, 
@@ -451,7 +482,10 @@ class PaperTradingAccount:
                 "invalidation": decision.get("invalidation"),
                 "time": datetime.utcnow().isoformat(), 
                 "result": "OPEN"
-            })
+            }
+            if self.history_collection is not None:
+                await self.history_collection.insert_one(entry_log)
+                
             await self.save_state()
 
         elif signal == "close":

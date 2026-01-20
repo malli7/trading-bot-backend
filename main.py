@@ -78,22 +78,103 @@ async def analysis(market_id: int) -> Dict[str, Any]:
     """Fetch full analysis including multiple timeframes."""
     return await get_full_analysis(market_id)
 
+import asyncio
+from typing import Optional, List
+
+# Senior Dev Refactor: Core Imports
+from core.schemas import ConsolidationResponse, ConsolidationMetrics
+
+async def _analyze_consolidation(market_id: int, timeframe: str) -> ConsolidationMetrics:
+    """Helper to analyze a single market with strict typing."""
+    symbol = settings.MARKET_ID_MAP.get(market_id, "Unknown")
+    
+    # Fetch ample data to ensure stable ADX calc (needs ~2x period lag + buffer)
+    indicators = await get_indicators(timeframe, market_id, limit=50)
+    
+    if not indicators or "adx14" not in indicators or not indicators["adx14"]:
+        return ConsolidationMetrics(
+            symbol=symbol,
+            is_consolidating=False,
+            market_state="Unknown",
+            adx=0.0,
+            bandwidth=0.0
+        )
+        
+    last_adx = indicators["adx14"][-1]
+    
+    bandwidths = indicators.get("squeeze_bandwidth", [])
+    last_bw = bandwidths[-1] if bandwidths else 0.0
+    
+    # Logic:
+    # Strong Consolidation: ADX < 20
+    # Moderate Consolidation / Weak Trend: ADX < 25
+    
+    is_consolidating = last_adx < 25
+    
+    status = "Consolidation" if is_consolidating else "Trending"
+    if last_adx > 40:
+        status = "Strong Trend"
+    elif last_adx < 20: 
+        status = "Strong Consolidation"
+        
+    return ConsolidationMetrics(
+        symbol=symbol,
+        is_consolidating=is_consolidating,
+        market_state=status,
+        adx=last_adx,
+        bandwidth=last_bw
+    )
+
+@app.get("/is-consolidation", response_model=ConsolidationResponse)
+async def check_consolidation(market_id: Optional[int] = None, timeframe: str = settings.DEFAULT_TIMEFRAME) -> ConsolidationResponse:
+    """
+    Check if the market is currently in consolidation using technical indicators.
+    If market_id is omitted, checks ALL supported markets (ETH, BTC, SOL).
+    
+    Consolidation is defined as:
+    - ADX < 25 (Weak or No Trend)
+    - OR Bollinger Bandwidth is tightening
+    """
+    if market_id is not None:
+        # Single market request
+        result = await _analyze_consolidation(market_id, timeframe)
+        return ConsolidationResponse(results=[result])
+    
+    # All markets request
+    # Use keys from the constant map to drive the loop dynamicallly
+    tasks = [
+        _analyze_consolidation(mid, timeframe)
+        for mid in settings.MARKET_ID_MAP.keys()
+    ]
+    
+    results = await asyncio.gather(*tasks)
+    return ConsolidationResponse(results=results)
+
 @app.post("/trade_decision", response_model=Dict[str, Any])
 async def trade_decision() -> Dict[str, Any]:
     """
-    Trigger the AI Agent Cycle (The Conductor).
-    Executes: Learn -> See -> Think -> Decide -> Act.
+    Trigger the Swarm Agent Cycle (Standard Mode).
     """
-    result = await run_agent_cycle()
+    result = await run_agent_cycle(mode="SWARM")
+    return result
+
+@app.post("/simple_trade_decision", response_model=Dict[str, Any])
+async def simple_trade_decision() -> Dict[str, Any]:
+    """
+    Trigger the Simple Agent Cycle (Single-Shot Mode).
+    """
+    result = await run_agent_cycle(mode="SIMPLE")
     return result
 
 @app.get("/account", response_model=Dict[str, Any])
-def get_account_info() -> Dict[str, Any]:
+async def get_account_info() -> Dict[str, Any]:
     """Retrieve current account status, positions, and history."""
+    # Ensure history is fetched async
+    history = await demo_account.get_history(limit=50)
     return {
         "cash": demo_account.cash,
         "positions": demo_account.positions,
-        "history": demo_account.history,
+        "history": history,
         "total_value": demo_account.total_value
     }
 
@@ -109,7 +190,9 @@ def read_root() -> Dict[str, str]:
     return {
         "status": "operational",
         "service": settings.APP_NAME,
-        "mode": "debug" if settings.DEBUG else "production"
+        "mode": "debug" if settings.DEBUG else "production",
+        # Default mode check
+        "default_mode": settings.TRADING_MODE
     }
 
 if __name__ == "__main__":

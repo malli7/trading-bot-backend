@@ -22,6 +22,7 @@ from typing import Dict, Any, List, Optional
 
 from openai import AsyncOpenAI
 from core.config import settings
+from core.llm import get_llm_client
 from services.account import demo_account
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,9 @@ logger = logging.getLogger(__name__)
 SWARM_MODELS = settings.SWARM_MODELS
 MASTER_MODEL_ID = settings.MASTER_MODEL_ID
 from agents.reflection import ReflectionAgent
-from prompt import SWARM_PROMPT, MASTER_AGGREGATION_PROMPT
+from prompts.swarm import SWARM_PROMPT_TREND, SWARM_PROMPT_REVERSION, SWARM_PROMPT_SCALPER, MASTER_AGGREGATION_PROMPT
+
+from core.cache import SmartCache
 
 class SwarmAnalyst:
     """
@@ -45,26 +48,64 @@ class SwarmAnalyst:
     
     def __init__(self):
         self.api_key = settings.OPENROUTER_API_KEY
-        self.client = AsyncOpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=self.api_key,
-        )
+        self.client = get_llm_client()
         self.reflection_agent = ReflectionAgent()
+        self.cache = SmartCache(name="SwarmMaster")
         
         # Diverse models for different perspectives (Using reliable IDs)
         self.models = SWARM_MODELS
 
-    async def get_consensus(self, market_data: Dict[str, Any], current_position: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _get_latest_indicator(self, market_data: Dict[str, Any], key: str, default: float = 0.0) -> float:
+        """Helper to extract latest value from market data arrays."""
+        try:
+            # Handle nested structure first
+            source = market_data.get("15m", market_data)
+            arr = source.get(key, [])
+            if arr and len(arr) > 0:
+                return float(arr[-1])
+        except:
+            pass
+        return default
+
+    async def get_consensus(self, symbol: str, market_data: Dict[str, Any], current_position: Optional[Dict[str, Any]] = None, last_trade_time: str = "Unknown", current_time: Optional[float] = None) -> Dict[str, Any]:
         """
         Query all models in parallel and aggregate votes via Master LLM.
         
         Args:
+            symbol: The asset symbol (e.g., "BTC").
             market_data: Technical indicators for the asset.
             current_position: Existing position info (or None).
+            last_trade_time: Human readable string of time since last action.
+            current_time: Optional timestamp for backtesting simulation.
             
         Returns:
             Dict containing 'signal', 'confidence', 'rationale', and 'invalidation'.
         """
+        # 0. Smart Caching Check
+        # Extract metrics for cache validation
+        try:
+            # Handle nested structure: market_data = {'15m': {'midPrices': [...]}}
+            if "15m" in market_data:
+                latest_data = market_data["15m"]
+                # Try 'midPrices' (indicators.py style) or 'close' (raw candle style)
+                prices = latest_data.get("midPrices") or latest_data.get("close") or []
+                current_close = float(prices[-1]) if prices else 0.0
+            else:
+                 # Fallback if flat structure
+                prices = market_data.get("midPrices") or market_data.get("close") or []
+                current_close = float(prices[-1]) if prices else 0.0
+        except:
+            current_close = 0.0
+            
+        rsi = self._get_latest_indicator(market_data, "rsi14")
+        adx = self._get_latest_indicator(market_data, "adx14")
+        
+        if not self.cache.should_refresh(symbol, current_close, rsi, adx, current_time=current_time):
+            logger.info(f"Swarm: Using CACHED Master Consensus for {symbol}.")
+            cached = self.cache.get(symbol)
+            if cached:
+                return cached
+
         # 1. Get Lessons
         lessons = await demo_account.get_recent_lessons()
         lessons_str = "\n- ".join(lessons) if lessons else "None"
@@ -72,23 +113,18 @@ class SwarmAnalyst:
         # Format Position Context for LLM
         if current_position:
             pos_str = f"{current_position['sign']} ({current_position['quantity']:.4f} units) @ ${current_position['entry_price']:.2f}"
-            pnl_pct = ((current_position.get('current_price', 0) - current_position['entry_price']) / current_position['entry_price']) * 100
-            if current_position['sign'] == "SHORT": pnl_pct *= -1
-            pos_str += f" | PnL: {pnl_pct:.2f}%"
-            
-            if "stop_loss" in current_position:
-                 pos_str += f" | SL: ${current_position['stop_loss']}"
+            curr_price = current_position.get('current_price', current_position['entry_price'])
+            pnl = (curr_price - current_position['entry_price']) / current_position['entry_price'] * 100
+            if current_position['sign'] == "SHORT": pnl = -pnl
+            pos_str += f" | PnL: {pnl:.2f}%"
         else:
-            pos_str = "NONE (Flat)"
+            pos_str = "FLAT (No Position)"
 
-        # 2. Prepare Tasks
-        tasks = []
-        market_str = json.dumps(market_data, default=str)
-        
-        for model_cfg in self.models:
-            tasks.append(self._query_model(model_cfg, market_str, lessons_str, pos_str))
-            
-        # 3. Gather Results
+        # 2. Query Swarm Agents (Parallel)
+        tasks = [
+            self._query_model(model, json.dumps(market_data), lessons_str, pos_str)
+            for model in self.models
+        ]
         results = await asyncio.gather(*tasks)
         valid_results = [r for r in results if r is not None]
         
@@ -101,9 +137,14 @@ class SwarmAnalyst:
              }
 
         # 4. Master Aggregation
-        return await self._aggregate_with_master(valid_results, pos_str)
+        final_decision = await self._aggregate_with_master(valid_results, pos_str, last_trade_time)
+        
+        # 5. Update Cache
+        self.cache.update(symbol, current_close, rsi, adx, final_decision, current_time=current_time)
+        
+        return final_decision
 
-    async def _aggregate_with_master(self, results: List[Dict], pos_str: str) -> Dict[str, Any]:
+    async def _aggregate_with_master(self, results: List[Dict], pos_str: str, last_trade_time: str) -> Dict[str, Any]:
         """
         Send all individual agent reports to a Master LLM for synthesis.
         """
@@ -116,7 +157,7 @@ class SwarmAnalyst:
         prompt = MASTER_AGGREGATION_PROMPT.format(
             reports=reports,
             position=pos_str,
-            time_since_last_trade="N/A"
+            time_since_last_trade=last_trade_time
         )
         
         try:
@@ -240,8 +281,18 @@ class SwarmAnalyst:
 
     async def _query_model(self, model_cfg: Dict[str, str], market_data: str, lessons: str, pos_str: str) -> Optional[Dict[str, Any]]:
         """Query a single Swarm Agent."""
-        prompt = SWARM_PROMPT.format(
-            role_name=model_cfg["role"],
+        role = model_cfg["role"]
+        
+        # Select Specialized Prompt
+        if "Risk Manager" in role:
+            base_prompt = SWARM_PROMPT_REVERSION
+        elif "Pattern" in role:
+            base_prompt = SWARM_PROMPT_SCALPER
+        else:
+            base_prompt = SWARM_PROMPT_TREND # Default to Trend (Aggressive Trend Follower)
+            
+        prompt = base_prompt.format(
+            role_name=role,
             market_data=market_data,
             lessons=lessons,
             position=pos_str
@@ -252,40 +303,25 @@ class SwarmAnalyst:
             completion = await self.client.chat.completions.create(
                 model=model_cfg["id"],
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.3
+                temperature=0.3,
+                response_format={"type": "json_object"}
             )
-            logger.info(f"PERF: Swarm Agent ({model_cfg['role']}) LLM Call took {time.time() - start_ts:.2f}s")
             content = completion.choices[0].message.content
             
-            # Simple parsing
-            vote = "HOLD"
-            conf = 0.0
-            reason = "No reason"
-            invalidation = "None"
+            # JSON Parsing
+            data = json.loads(content)
             
-            lines = content.split('\n')
-            for line in lines:
-                clean_line = line.strip()
-                if clean_line.startswith("Vote:"):
-                    vote = clean_line.split(":", 1)[1].strip()
-                elif clean_line.startswith("Confidence:"):
-                     try:
-                        conf = float(clean_line.split(":", 1)[1].strip().replace('%',''))
-                     except: pass
-                elif clean_line.startswith("Technical Reason:"):
-                    reason = clean_line.split(":", 1)[1].strip()
-                elif clean_line.startswith("Reason:"): # Fallback
-                     reason = clean_line.split(":", 1)[1].strip()
-                elif clean_line.startswith("Invalidation:"):
-                    invalidation = clean_line.split(":", 1)[1].strip()
-                    
             return {
                 "role": model_cfg["role"],
-                "vote": vote,
-                "confidence": conf,
-                "reason": reason,
-                "invalidation": invalidation
+                "vote": data.get("vote", "HOLD").upper(),
+                "confidence": float(data.get("confidence", 0)),
+                "reason": data.get("reason", "No reason provided"),
+                "invalidation": data.get("invalidation", "None")
             }
+            
+        except Exception as e:
+            logger.error(f"Model {model_cfg['id']} failed: {e}")
+            return None
             
         except Exception as e:
             logger.error(f"Model {model_cfg['id']} failed: {e}")

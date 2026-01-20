@@ -22,8 +22,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Agentic Backtest")
     parser.add_argument("--days", type=int, default=1, help="Days to simulate")
     parser.add_argument("--limit", type=int, default=None, help="Candles to fetch (Default: days*96 + 300 buffer)")
+    parser.add_argument("--mode", type=str, default="SIMPLE", choices=["SWARM", "SIMPLE"], help="Override TRADING_MODE (Default: SIMPLE)")
     
     args = parser.parse_args()
+
+    # Apply Mode Override (Always applies, default is SIMPLE)
+    from core.config import settings
+    settings.TRADING_MODE = args.mode
+    print(f"MOde Override: Running in {settings.TRADING_MODE} Mode")
     
     # Logic: 96 steps/day (15m candles)
     STEPS_PER_DAY = 96

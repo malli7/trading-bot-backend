@@ -21,9 +21,10 @@ from datetime import datetime, timedelta
 from openai import AsyncOpenAI
 from services.account import demo_account
 from core.config import settings
+from core.llm import get_llm_client
 
 REFLECTION_MODEL_ID = settings.REFLECTION_MODEL_ID
-from prompt import REFLECTION_PROMPT
+from prompts.reflection import REFLECTION_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +40,7 @@ class ReflectionAgent:
     def __init__(self):
         self.model = REFLECTION_MODEL_ID
         self.api_key = settings.OPENROUTER_API_KEY
-        self.client = AsyncOpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=self.api_key,
-        )
+        self.client = get_llm_client()
 
     async def review_performance(self, current_prices: Dict[str, float]) -> None:
         """
@@ -50,19 +48,18 @@ class ReflectionAgent:
         """
         logger.info("Reflection Agent: Starting 360° Review Cycle...")
         
-        if not demo_account.history:
-            logger.info("Reflection Agent: No history to review.")
-            return
-
         # 1. Fetch Data
-        # Get last 100 actions to ensure we cover recent context
-        history = demo_account.history[-100:] 
+        history = await demo_account.get_history(limit=100)
         
+        if not history:
+            logger.info("Reflection Agent: No history to review.")
+            
         # 2. Parallel Analysis Tasks
         tasks = []
         
         # A. Analyze Closed Trades (Post-Mortem)
-        tasks.append(self._analyze_closed_trades(history, current_prices))
+        if history:
+            tasks.append(self._analyze_closed_trades(history, current_prices))
         
         # B. Analyze Open Positions (Active Audit)
         # We use demo_account.positions directly
