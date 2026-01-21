@@ -7,3 +7,6 @@ motor
 gunicorn
 certifi
 pydantic-settings
+numpy
+pandas
+TA-Lib
